@@ -1,9 +1,10 @@
 import AVFoundation
 import CoreMedia
 
-/// Registers the four Camera Control hardware dial sliders (ISO/Shutter/EV/Focus) on the
-/// session and wires them to the same `ManualControlEngine` setters the on-screen sliders
-/// use — single source of truth, no duplicate control logic (Task 12).
+/// Registers the Camera Control hardware dial sliders (ISO/Shutter/Focus — no EV, since
+/// AVFoundation's exposure target bias is a metering-only no-op once the device is in
+/// custom exposure mode) on the session, wired to the same `ManualControlEngine` setters
+/// the on-screen sliders use — single source of truth, no duplicate control logic (Task 12).
 ///
 /// Device-gated: `session.supportsControls` is false on any hardware without Camera
 /// Control (or below iOS 18), in which case this is a no-op and the app behaves exactly
@@ -39,11 +40,6 @@ final class CameraControlBarController: NSObject {
                 DispatchQueue.main.async { engine?.setExposureDuration(duration) }
             }
 
-            let evSlider = AVCaptureSlider("Exposure Bias", symbolName: "plusminus", in: ranges.exposureTargetBiasRange)
-            evSlider.setActionQueue(sessionQueue) { value in
-                DispatchQueue.main.async { engine?.setExposureTargetBias(value) }
-            }
-
             let focusSlider = AVCaptureSlider("Focus", symbolName: "viewfinder", in: ManualControlRanges.lensPositionRange)
             focusSlider.setActionQueue(sessionQueue) { value in
                 DispatchQueue.main.async { engine?.setLensPosition(value) }
@@ -51,7 +47,7 @@ final class CameraControlBarController: NSObject {
 
             // Sliders must have an action + action queue set before being added (SDK docs),
             // and addControl may be called on an already-running session.
-            for control in [isoSlider, shutterSlider, evSlider, focusSlider] {
+            for control in [isoSlider, shutterSlider, focusSlider] {
                 if session.canAddControl(control) {
                     session.addControl(control)
                 }

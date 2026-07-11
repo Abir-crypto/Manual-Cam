@@ -6,7 +6,6 @@ import Foundation
 struct ManualControlRanges: Equatable {
     var isoRange: ClosedRange<Float>
     var exposureDurationRange: ClosedRange<CMTime>
-    var exposureTargetBiasRange: ClosedRange<Float>
     var maxWhiteBalanceGain: Float
 
     /// Focus (lens position) is always normalized 0...1 by AVFoundation convention.
@@ -18,7 +17,6 @@ struct ManualControlRanges: Equatable {
     static let fallback = ManualControlRanges(
         isoRange: 50...800,
         exposureDurationRange: CMTime(value: 1, timescale: 1000)...CMTime(value: 1, timescale: 30),
-        exposureTargetBiasRange: -2...2,
         maxWhiteBalanceGain: 4.0
     )
 }

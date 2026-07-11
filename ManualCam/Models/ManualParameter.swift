@@ -1,7 +1,7 @@
 import Foundation
 
 enum ManualParameter: String, CaseIterable, Identifiable {
-    case iso, shutter, focus, whiteBalance, exposureBias
+    case iso, shutter, focus, whiteBalance
 
     var id: String { rawValue }
 
@@ -11,7 +11,6 @@ enum ManualParameter: String, CaseIterable, Identifiable {
         case .shutter: "SHUTTER"
         case .focus: "FOCUS"
         case .whiteBalance: "WB"
-        case .exposureBias: "EV"
         }
     }
 }

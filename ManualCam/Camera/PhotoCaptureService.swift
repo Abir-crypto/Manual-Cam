@@ -52,7 +52,10 @@ final class PhotoCaptureService: NSObject, ObservableObject {
             settings = AVCapturePhotoSettings()
         }
 
-        settings.photoQualityPrioritization = .quality
+        // .speed forces a true single-exposure capture — .quality opts into multi-frame
+        // fusion whose EXIF can drift from the exact manually-set ISO/shutter (see
+        // CameraSessionManager.configureSession's maxPhotoQualityPrioritization comment).
+        settings.photoQualityPrioritization = .speed
         stateLock.lock()
         inFlightCaptures[settings.uniqueID] = InFlightCapture()
         stateLock.unlock()

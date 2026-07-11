@@ -17,6 +17,7 @@ final class CameraCoordinator: ObservableObject {
 
     private var controlBarController: AnyObject?
     private var cancellables = Set<AnyCancellable>()
+    private var hasCompletedInitialDeviceSetup = false
 
     init(settingsStore: AppSettingsStore = AppSettingsStore()) {
         let sessionManager = CameraSessionManager()
@@ -30,9 +31,17 @@ final class CameraCoordinator: ObservableObject {
         sessionManager.setVideoDataOutputDelegate(peakingProcessor)
         captureService.setAppleProRAWEnabled(settingsStore.appleProRAWEnabled)
 
+        // SwiftUI views only observe `coordinator` itself (@ObservedObject), not these
+        // nested ObservableObjects — forward their changes so the UI actually re-renders
+        // when e.g. ManualControlEngine's ISO/shutter/etc. change.
+        for childPublisher in [sessionManager.objectWillChange, controlEngine.objectWillChange, captureService.objectWillChange, peakingProcessor.objectWillChange] {
+            childPublisher
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &cancellables)
+        }
+
         sessionManager.$currentDevice
             .compactMap { $0 }
-            .first()
             .sink { [weak self] device in
                 self?.handleDeviceAttached(device)
             }
@@ -51,6 +60,11 @@ final class CameraCoordinator: ObservableObject {
         captureService.capturePhoto(format: captureFormat)
     }
 
+    /// Switches to a different zoom/lens preset (ultra wide/wide/telephoto/etc).
+    func switchLens(_ lens: CameraLens) {
+        sessionManager.switchToLens(lens)
+    }
+
     /// Call on backgrounding/scene changes so a force-quit doesn't lose in-progress adjustments.
     func persistCurrentStateIfNeeded() {
         guard settingsStore.persistLastUsedValues else { return }
@@ -59,8 +73,15 @@ final class CameraCoordinator: ObservableObject {
         CameraStatePersistenceStore.save(state)
     }
 
+    /// The back camera input is a single virtual multi-camera device for the whole
+    /// session lifetime (lens switching is a `videoZoomFactor` change, not a device
+    /// swap — see `CameraSessionManager.switchToLens(_:)`), so this fires once, at
+    /// launch. Kept non-`.first()`-gated defensively in case that ever changes.
     private func handleDeviceAttached(_ device: AVCaptureDevice) {
         controlEngine.attach(device: device)
+
+        guard !hasCompletedInitialDeviceSetup else { return }
+        hasCompletedInitialDeviceSetup = true
 
         if settingsStore.persistLastUsedValues, let saved = CameraStatePersistenceStore.load() {
             controlEngine.restore(saved)

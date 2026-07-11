@@ -7,7 +7,6 @@ struct PersistedCameraState: Codable, Equatable {
     var exposureDurationSeconds: Double
     var lensPosition: Float
     var whiteBalanceKelvin: Double
-    var exposureTargetBias: Float
     var captureFormat: CaptureFormat
 
     var exposureDuration: CMTime {
@@ -19,14 +18,12 @@ struct PersistedCameraState: Codable, Equatable {
         exposureDuration: CMTime,
         lensPosition: Float,
         whiteBalanceKelvin: Double,
-        exposureTargetBias: Float,
         captureFormat: CaptureFormat
     ) {
         self.iso = iso
         self.exposureDurationSeconds = exposureDuration.seconds
         self.lensPosition = lensPosition
         self.whiteBalanceKelvin = whiteBalanceKelvin
-        self.exposureTargetBias = exposureTargetBias
         self.captureFormat = captureFormat
     }
 }

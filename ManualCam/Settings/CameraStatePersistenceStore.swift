@@ -20,7 +20,6 @@ enum CameraStatePersistenceStore {
         exposureDuration: CMTime(value: 1, timescale: 125),
         lensPosition: 0.5,
         whiteBalanceKelvin: 5600,
-        exposureTargetBias: 0,
         captureFormat: .heicOnly
     )
 }

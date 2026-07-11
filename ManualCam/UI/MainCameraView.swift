@@ -1,4 +1,5 @@
 import CoreMedia
+import Foundation
 import SwiftUI
 
 /// Primary camera screen composing preview, peaking overlay, value readout, manual
@@ -12,24 +13,13 @@ struct MainCameraView: View {
 
     var body: some View {
         ZStack {
-            CameraPreviewView(
-                session: coordinator.sessionManager.session,
-                onLightPress: { coordinator.controlEngine.setLensPosition(coordinator.controlEngine.lensPosition) },
-                onFullPress: { capture() }
-            )
-            .ignoresSafeArea()
-
-            if coordinator.isPeakingEnabled, let overlay = coordinator.peakingProcessor.overlayImage {
-                Image(decorative: overlay, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .allowsHitTesting(false)
-                    .ignoresSafeArea()
-            }
+            Color.black.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 topBar
-                Spacer()
+                Spacer(minLength: 8)
+                viewfinder
+                Spacer(minLength: 8)
                 valueReadoutStrip
                 parameterTabBar
                 parameterSlider
@@ -72,6 +62,30 @@ struct MainCameraView: View {
 
     private func capture() {
         coordinator.capturePhoto()
+    }
+
+    // MARK: - Viewfinder
+
+    /// Boxed to the sensor's actual 4:3 capture ratio (3:4 in portrait) — the rest of
+    /// the screen stays black rather than cropping/stretching the preview full-bleed.
+    private var viewfinder: some View {
+        ZStack {
+            CameraPreviewView(
+                session: coordinator.sessionManager.session,
+                onLightPress: { coordinator.controlEngine.setLensPosition(coordinator.controlEngine.lensPosition) },
+                onFullPress: { capture() }
+            )
+
+            if coordinator.isPeakingEnabled, let overlay = coordinator.peakingProcessor.overlayImage {
+                Image(decorative: overlay, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .allowsHitTesting(false)
+            }
+        }
+        .aspectRatio(3.0 / 4.0, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .clipped()
     }
 
     // MARK: - Top bar
@@ -120,8 +134,6 @@ struct MainCameraView: View {
             Text(CameraValueFormatting.shutter(coordinator.controlEngine.exposureDuration))
             Divider().frame(height: 12).overlay(.white.opacity(0.4))
             Text(CameraValueFormatting.kelvin(coordinator.controlEngine.whiteBalanceKelvin))
-            Divider().frame(height: 12).overlay(.white.opacity(0.4))
-            Text(CameraValueFormatting.exposureBias(coordinator.controlEngine.exposureTargetBias))
         }
         .font(.caption.monospacedDigit())
         .foregroundStyle(.white)
@@ -160,35 +172,34 @@ struct MainCameraView: View {
         let engine = coordinator.controlEngine
         switch activeParameter {
         case .iso:
-            RangeSliderRow(
-                value: Double(engine.iso),
-                range: Double(engine.ranges.isoRange.lowerBound)...Double(engine.ranges.isoRange.upperBound),
+            // ISO is used in stops (50/100/200/400/800...) — a linear slider wastes most
+            // of its length on one end, so the slider operates in log2 space (each tick
+            // is an equal proportional step) and converts back to real ISO on change.
+            WheelSlider(
+                value: log2(Double(engine.iso)),
+                range: log2(Double(engine.ranges.isoRange.lowerBound))...log2(Double(engine.ranges.isoRange.upperBound)),
                 valueText: CameraValueFormatting.iso(engine.iso)
-            ) { engine.setISO(Float($0)) }
+            ) { engine.setISO(Float(exp2($0))) }
         case .shutter:
-            RangeSliderRow(
-                value: engine.exposureDuration.seconds,
-                range: engine.ranges.exposureDurationRange.lowerBound.seconds...engine.ranges.exposureDurationRange.upperBound.seconds,
+            // Same reasoning as ISO: shutter speed is used in stops (1/8, 1/15, 1/30...),
+            // so the slider operates in log2(seconds) space.
+            WheelSlider(
+                value: log2(engine.exposureDuration.seconds),
+                range: log2(engine.ranges.exposureDurationRange.lowerBound.seconds)...log2(engine.ranges.exposureDurationRange.upperBound.seconds),
                 valueText: CameraValueFormatting.shutter(engine.exposureDuration)
-            ) { engine.setExposureDuration(CMTime(seconds: $0, preferredTimescale: 1_000_000)) }
+            ) { engine.setExposureDuration(CMTime(seconds: exp2($0), preferredTimescale: 1_000_000)) }
         case .focus:
-            RangeSliderRow(
+            WheelSlider(
                 value: Double(engine.lensPosition),
                 range: Double(ManualControlRanges.lensPositionRange.lowerBound)...Double(ManualControlRanges.lensPositionRange.upperBound),
                 valueText: CameraValueFormatting.focus(engine.lensPosition)
             ) { engine.setLensPosition(Float($0)) }
         case .whiteBalance:
-            RangeSliderRow(
+            WheelSlider(
                 value: engine.whiteBalanceKelvin,
                 range: ManualControlRanges.kelvinRange,
                 valueText: CameraValueFormatting.kelvin(engine.whiteBalanceKelvin)
             ) { engine.setWhiteBalanceKelvin($0) }
-        case .exposureBias:
-            RangeSliderRow(
-                value: Double(engine.exposureTargetBias),
-                range: Double(engine.ranges.exposureTargetBiasRange.lowerBound)...Double(engine.ranges.exposureTargetBiasRange.upperBound),
-                valueText: CameraValueFormatting.exposureBias(engine.exposureTargetBias)
-            ) { engine.setExposureTargetBias(Float($0)) }
         }
     }
 
@@ -225,33 +236,37 @@ struct MainCameraView: View {
 
             Spacer()
 
-            Color.clear.frame(width: 44, height: 44)
+            lensSwitcher
         }
         .padding(.horizontal, 24)
         .padding(.top, 8)
     }
-}
 
-/// Horizontal slider + numeric readout + filled range bar (Task 8).
-private struct RangeSliderRow: View {
-    let value: Double
-    let range: ClosedRange<Double>
-    let valueText: String
-    let onChange: (Double) -> Void
+    // MARK: - Lens switcher
 
-    var body: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text(valueText)
-                    .font(.caption.monospacedDigit().bold())
-                Spacer()
+    @ViewBuilder
+    private var lensSwitcher: some View {
+        let lenses = coordinator.sessionManager.availableLenses
+        if lenses.count > 1 {
+            Menu {
+                ForEach(lenses) { lens in
+                    Button {
+                        coordinator.switchLens(lens)
+                    } label: {
+                        Label(lens.displayName, systemImage: lens.symbolName)
+                        if lens == coordinator.sessionManager.currentLens {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: coordinator.sessionManager.currentLens?.symbolName ?? "camera")
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
             }
-            Slider(
-                value: Binding(get: { value }, set: onChange),
-                in: range
-            )
+        } else {
+            Color.clear.frame(width: 44, height: 44)
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal)
     }
 }

@@ -14,7 +14,6 @@ nonisolated final class ManualControlEngine: ObservableObject {
     @Published var exposureDuration = CMTime(value: 1, timescale: 125)
     @Published var lensPosition: Float = 0.5
     @Published var whiteBalanceKelvin: Double = 5600
-    @Published var exposureTargetBias: Float = 0
 
     private weak var device: AVCaptureDevice?
     private let queue: DispatchQueue
@@ -23,21 +22,23 @@ nonisolated final class ManualControlEngine: ObservableObject {
         self.queue = queue
     }
 
-    /// Call whenever the active device changes (initial configure, or app resume).
+    /// Call whenever the active device changes — initial configure, app resume, or a
+    /// lens switch (Task 12-adjacent lens picker). Re-queries ranges for the new device
+    /// and re-applies the engine's *current* values (clamped) to it, so switching lenses
+    /// doesn't silently drop back to that lens's own auto-exposure/auto-everything state.
     func attach(device: AVCaptureDevice) {
         self.device = device
         refreshRanges(for: device)
+        applyCurrentValues(to: device)
     }
 
     func refreshRanges(for device: AVCaptureDevice) {
         let format = device.activeFormat
-        let newRanges = ManualControlRanges(
+        ranges = ManualControlRanges(
             isoRange: format.minISO...format.maxISO,
             exposureDurationRange: format.minExposureDuration...format.maxExposureDuration,
-            exposureTargetBiasRange: device.minExposureTargetBias...device.maxExposureTargetBias,
             maxWhiteBalanceGain: device.maxWhiteBalanceGain
         )
-        DispatchQueue.main.async { [weak self] in self?.ranges = newRanges }
     }
 
     // MARK: - Setters
@@ -68,20 +69,9 @@ nonisolated final class ManualControlEngine: ObservableObject {
         queue.async { [weak self] in
             guard let self, let device = self.device else { return }
             self.withLockedConfiguration(on: device) {
-                if device.isFocusModeSupported(.locked) {
+                if device.isLockingFocusWithCustomLensPositionSupported {
                     device.setFocusModeLocked(lensPosition: clamped, completionHandler: nil)
                 }
-            }
-        }
-    }
-
-    func setExposureTargetBias(_ bias: Float) {
-        let clamped = min(max(bias, ranges.exposureTargetBiasRange.lowerBound), ranges.exposureTargetBiasRange.upperBound)
-        self.exposureTargetBias = clamped
-        queue.async { [weak self] in
-            guard let self, let device = self.device else { return }
-            self.withLockedConfiguration(on: device) {
-                device.setExposureTargetBias(clamped, completionHandler: nil)
             }
         }
     }
@@ -106,21 +96,8 @@ nonisolated final class ManualControlEngine: ObservableObject {
         exposureDuration = state.exposureDuration
         lensPosition = state.lensPosition
         whiteBalanceKelvin = state.whiteBalanceKelvin
-        exposureTargetBias = state.exposureTargetBias
-        queue.async { [weak self] in
-            guard let self, let device = self.device else { return }
-            self.applyExposure(on: device, iso: state.iso, duration: state.exposureDuration)
-            let gains = WhiteBalanceConverter.gains(forKelvin: state.whiteBalanceKelvin, device: device)
-            self.withLockedConfiguration(on: device) {
-                if device.isFocusModeSupported(.locked) {
-                    device.setFocusModeLocked(lensPosition: state.lensPosition, completionHandler: nil)
-                }
-                if device.isWhiteBalanceModeSupported(.locked) {
-                    device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
-                }
-                device.setExposureTargetBias(state.exposureTargetBias, completionHandler: nil)
-            }
-        }
+        guard let device else { return }
+        applyCurrentValues(to: device)
     }
 
     var currentPersistedState: PersistedCameraState {
@@ -129,12 +106,35 @@ nonisolated final class ManualControlEngine: ObservableObject {
             exposureDuration: exposureDuration,
             lensPosition: lensPosition,
             whiteBalanceKelvin: whiteBalanceKelvin,
-            exposureTargetBias: exposureTargetBias,
             captureFormat: .heicOnly // caller overwrites with the actual current toggle value
         )
     }
 
     // MARK: - Device application (must run on `queue`)
+
+    /// Pushes the engine's current in-memory values onto `device` — used both to restore
+    /// persisted values (Task 11) and to carry the current manual settings across a lens
+    /// switch. Values are captured before dispatching so the closure doesn't read
+    /// `@Published` state from the background queue.
+    private func applyCurrentValues(to device: AVCaptureDevice) {
+        let targetISO = iso
+        let targetDuration = exposureDuration
+        let targetLensPosition = lensPosition
+        let targetKelvin = whiteBalanceKelvin
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.applyExposure(on: device, iso: targetISO, duration: targetDuration)
+            let gains = WhiteBalanceConverter.gains(forKelvin: targetKelvin, device: device)
+            self.withLockedConfiguration(on: device) {
+                if device.isLockingFocusWithCustomLensPositionSupported {
+                    device.setFocusModeLocked(lensPosition: targetLensPosition, completionHandler: nil)
+                }
+                if device.isWhiteBalanceModeSupported(.locked) {
+                    device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+                }
+            }
+        }
+    }
 
     /// ISO and shutter share one call — read the device's current value for whichever side isn't changing.
     private func applyExposure(on device: AVCaptureDevice, iso: Float?, duration: CMTime?) {

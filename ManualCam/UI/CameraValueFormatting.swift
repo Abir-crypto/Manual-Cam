@@ -20,10 +20,6 @@ enum CameraValueFormatting {
         "\(Int(value.rounded()))K"
     }
 
-    static func exposureBias(_ value: Float) -> String {
-        String(format: "%+.1f", value)
-    }
-
     static func focus(_ value: Float) -> String {
         String(format: "%.0f%%", value * 100)
     }
