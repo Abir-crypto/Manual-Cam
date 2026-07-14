@@ -62,12 +62,19 @@ These are explicit product decisions — don't "improve" past them:
 - **Deviation from spec**: SPEC.md says back camera only, no front camera — that part is
   unchanged (no front camera; the user explicitly asked for it to be removed after an
   earlier iteration added it). What SPEC.md didn't anticipate: there's now a lens
-  switcher (bottom-right of the shutter button) covering every zoom point the connected
-  iPhone's back lenses actually report — not just three fixed physical lenses, but also
-  any extra native zoom point a given lens exposes (e.g. an "8×" telephoto crop). See
-  `CameraLens`/`CameraSessionManager` below.
-- Every capture is a **twin RAW (DNG/ProRAW) + HEIC** shot (when RAW is enabled) —
-  one `AVCapturePhotoSettings` call, not two separate captures.
+  switcher (`MainCameraView.lensTabBar`, an always-visible tab row above the
+  ISO/SHUTTER/FOCUS/WB tabs — originally a menu button bottom-right of the shutter, moved
+  per the Task 8/9 restructuring deviation further below) covering every zoom point the
+  connected iPhone's back lenses actually report — not just three fixed physical lenses,
+  but also any extra native zoom point a given lens exposes (e.g. an "8×" telephoto
+  crop). See `CameraLens`/`CameraSessionManager` below.
+- **Deviation from spec**: SPEC.md's twin RAW+HEIC-in-one-shot capture is gone. Per
+  explicit user request ("I don't need them together"), `CaptureFormat` is now two
+  mutually exclusive modes — `.heic` and `.raw` — not a combined one; there is no
+  "RAW+HEIC" option anymore. `PhotoCaptureService.capturePhoto(format:)` builds either a
+  plain `AVCapturePhotoSettings()` (HEIC) or a RAW-only `AVCapturePhotoSettings
+  (rawPixelFormatType:)` (no `processedFormat` — not a twin shot) accordingly, falling
+  back to HEIC if the current lens doesn't support RAW.
 - Photos save to a **dedicated app-created photo album**, never the camera roll root.
   **Deviation from spec**: SPEC.md calls for add-only photo access only. In practice,
   `PHPhotoLibrary.requestAuthorization(for: .addOnly)` combined with the
@@ -159,8 +166,24 @@ These are explicit product decisions — don't "improve" past them:
     to device gains via `temperatureAndTintValues`/`deviceWhiteBalanceGains(for:)`, and
     clamped to `maxWhiteBalanceGain` before every apply (out-of-range gains crash).
 - **`PhotoCaptureService`** wraps `AVCapturePhotoOutput` capture + `AVCapturePhotoCaptureDelegate`,
-  builds the twin RAW+HEIC settings, and writes to the app's dedicated `PHPhotoLibrary`
-  album (created on first launch, identifier persisted).
+  builds HEIC-or-RAW settings (mutually exclusive — see the `CaptureFormat` deviation
+  above), and writes the result to the app's dedicated `PHPhotoLibrary` album (created
+  on first launch, identifier persisted). Every capture yields exactly one
+  `didFinishProcessingPhoto` callback now (never a separate RAW + processed pair), so
+  `InFlightCapture` just tracks one `(data, isRAW)` pair per `uniqueID`.
+  In `save(data:isRAW:)`, a RAW result is written to a temp file and added to the asset
+  via `addResource(with:fileURL:options:)` with `options.shouldMoveFile = true` (cleaned
+  up manually on failure, since `shouldMoveFile` only consumes the file on success) —
+  **not** `addResource(with:data:options:)` like HEIC uses. Confirmed bug: adding a RAW
+  resource from `Data` is a documented-broken path in PhotoKit — asset creation reliably
+  fails with `PHPhotosErrorChangeNotSupported` (`PHPhotosErrorDomain` code 3300, "the
+  change request is not supported as configured") when RAW is added from `Data`, and
+  reliably succeeds when added from a file URL instead. Don't revert the RAW resource to
+  the `Data` overload for "simplicity" — it will reintroduce this exact failure. Also
+  note the resource type: a RAW capture's file is added as `.photo` (the asset's
+  *primary* resource), not `.alternatePhoto` — `.alternatePhoto` only makes sense as a
+  secondary form alongside a primary `.photo`, which no longer exists now that HEIC and
+  RAW are mutually exclusive.
   Both `CameraSessionManager.photoOutput.maxPhotoQualityPrioritization` and each capture's
   `AVCapturePhotoSettings.photoQualityPrioritization` are `.speed`, not `.quality` —
   confirmed bug: `.quality` opts into Apple's multi-frame fusion (Smart HDR/Deep
@@ -177,15 +200,52 @@ These are explicit product decisions — don't "improve" past them:
   edge-detection + threshold + colored overlay. Must be fully skippable (not just
   hidden/zero-opacity) when peaking is toggled off, to avoid burning GPU cycles.
   Overlay composites in a SwiftUI `ZStack` above `CameraPreviewView`.
+  Two real bugs were caught and fixed on later review, both in the `CIColorMatrix` step
+  in `makeOverlay(from:)` (not caught earlier since this pipeline was never actually
+  exercised on a device until now):
+  1. `inputBiasVector` had `x: 0` — since R/G/B's input weight vectors are all zero, the
+     output red channel is `0 (dot product) + bias.x`. With `bias.x = 0` the overlay was
+     **solid black**, not red as the doc comment and Task 7 both intend. Fixed to
+     `bias.x = 1`, which makes output red a constant 1.0 regardless of input.
+  2. `inputAVector` included the input alpha channel (`w: 1`). Camera frames are opaque
+     (alpha ≈ 1 everywhere), so that added a constant +1 to every pixel's computed alpha
+     regardless of edge strength — the `threshold` (0.2) barely mattered, since even flat
+     non-edge regions landed around alpha 0.8. Fixed to `w: 0` so alpha is purely
+     `(inputR + inputG + inputB) - threshold`: near 0 in flat regions (clamped to
+     invisible), high at real edges.
+  Separately, **`AVCaptureVideoDataOutput` needed an explicit rotation angle** —
+  `CameraSessionManager.applyVideoDataOutputRotation(for:)` sets the connection's
+  `videoRotationAngle` via the modern `AVCaptureDevice.RotationCoordinator` (iOS 17+),
+  since (unlike `AVCaptureVideoPreviewLayer`, which auto-rotates its own contents) video
+  data output delivers frames in the sensor's native landscape orientation by default —
+  without this the peaking overlay would render sideways relative to the portrait
+  preview it's composited over. Must run before `session.startRunning()` per the SDK
+  docs (video data output physically rotates buffers, unlike other output types) — done
+  once in `configureSession()`, and reapplied inside the same begin/commit batch in
+  `switchToLens(_:)` whenever the physical lens changes, since swapping the session
+  input recreates the output's connection and resets this angle.
+  After both fixes above, the user still reported "nothing visible" — root cause turned
+  out to be UI, not the pipeline: the peaking toggle used a bolt/flash-shaped icon in a
+  crowded top bar and was easy to never notice, so it was simply never turned on.
+  Temporary on-screen diagnostics (`debugFramesSeen`/`debugLastFailureReason` on
+  `FocusPeakingProcessor`, `debugVideoDataOutputAdded`/`debugVideoRotationApplied` on
+  `CameraSessionManager`, a debug HUD in `MainCameraView`) were added and then removed
+  once this was confirmed — the underlying pipeline was fine all along. The whole top
+  bar is gone now anyway (see the Task 8/9 restructuring deviation below), so this
+  specific discoverability failure mode can't recur, but if peaking ever silently does
+  nothing again, that diagnostics pattern (proven to work) is the fastest way back to a
+  root cause — re-add it rather than guessing from source alone.
 - **`CameraPreviewView`** is a `UIViewRepresentable` around an `AVCaptureVideoPreviewLayer`;
   layer frame must be kept in sync with view bounds in `updateUIView`. **Deviation from
   spec**: uses `.resizeAspect`, not `.resizeAspectFill` as Task 6 specifies — the user
   wants the viewfinder boxed to the sensor's real 4:3 capture ratio (not full-bleed
   cropped/stretched), with the rest of the screen staying black. `MainCameraView`
   constrains the preview to `.aspectRatio(3.0/4.0, contentMode: .fit)` rather than
-  `.ignoresSafeArea()`, and the surrounding controls (top bar, value strip, tabs, slider,
-  capture bar) sit in the black space around that box in a plain vertical stack, rather
-  than overlaid on top of a full-bleed preview.
+  `.ignoresSafeArea()`, and the surrounding controls (value strip, lens tabs, parameter
+  tabs, slider, capture bar) sit in the black space around that box in a plain vertical
+  stack, rather than overlaid on top of a full-bleed preview. The viewfinder is the
+  topmost element on screen — see the Task 8/9 restructuring deviation below for why
+  there's no top bar above it anymore.
 - **`WheelSlider`** (replaces Task 8's plain `Slider` + numeric + range-bar spec) is a
   custom horizontal tick-ruler control per user request, styled from a reference
   screenshot (thin compact ticks, red fixed-center marker, no permanently visible
@@ -226,10 +286,33 @@ These are explicit product decisions — don't "improve" past them:
 - Cross-cutting rule: hardware Camera Control inputs (Task 12) and on-screen sliders must
   both funnel through `ManualControlEngine` and stay in sync live in both directions.
 - **`CameraCoordinator`** forwards `objectWillChange` from every nested `ObservableObject`
-  it owns (`sessionManager`, `controlEngine`, `captureService`, `peakingProcessor`) into
-  its own `objectWillChange`. SwiftUI views only observe `coordinator` itself
-  (`@ObservedObject`), so without this forwarding, changes to e.g.
+  it owns (`sessionManager`, `controlEngine`, `captureService`, `peakingProcessor`,
+  `settingsStore`) into its own `objectWillChange`. SwiftUI views only observe
+  `coordinator` itself (`@ObservedObject`), so without this forwarding, changes to e.g.
   `ManualControlEngine.iso` never trigger a re-render — the underlying hardware call
   still applies (visible in the live preview/capture), but sliders and numeric readouts
   silently freeze. If you add a new nested `ObservableObject` to `CameraCoordinator`,
-  add it to this forwarding list too.
+  add it to this forwarding list too. `settingsStore` was added late — it didn't matter
+  while `MainCameraView` never displayed a settings-store value directly, but once the
+  viewfinder started reading `settingsStore.isPeakingEnabled` live (see below), missing
+  this would have made peaking silently never turn on from `MainCameraView`'s POV.
+- **Deviation from spec**: Task 8's top bar and Task 9's "default format sets the
+  top-bar toggle's starting state" model are both gone, per explicit user request.
+  There's no more top bar at all — the viewfinder is the topmost element in
+  `MainCameraView` — and capture format + focus peaking now live *only* in the Settings
+  sheet, each backed directly by `AppSettingsStore` (`defaultCaptureFormat`,
+  `isPeakingEnabled`) with no separate "live session override" concept layered on top.
+  Concretely:
+  - `CameraCoordinator.captureFormat` is now a plain computed property
+    (`settingsStore.defaultCaptureFormat`), not an independent `@Published` value — there
+    was never a reason for the two to diverge once the only way to change format is the
+    Settings picker, and `PersistedCameraState.captureFormat` (a *second*, Task-11-driven
+    persistence path for the same concept) was removed as redundant.
+  - `AppSettingsStore.isPeakingEnabled` (persisted, default `false`) replaced
+    `CameraCoordinator.isPeakingEnabled` (an unpersisted `@Published` flag) —
+    `CameraCoordinator.init` applies the restored value to `peakingProcessor` immediately
+    and subscribes to `settingsStore.$isPeakingEnabled` to keep it in sync afterward.
+  - The capture bar's bottom-right lens `Menu` was replaced with a settings gear button;
+    lens switching moved to its own always-visible tab row (`MainCameraView.lensTabBar`,
+    styled identically to `parameterTabBar`) directly above the ISO/SHUTTER/FOCUS/WB tabs,
+    collapsing to nothing on single-lens devices rather than showing a redundant row.

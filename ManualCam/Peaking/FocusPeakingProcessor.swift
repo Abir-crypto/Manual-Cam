@@ -46,11 +46,18 @@ final class FocusPeakingProcessor: NSObject, ObservableObject {
 
         // Threshold to a hard red/transparent mask: colors above `threshold` become opaque red.
         colorMatrixFilter.setValue(edges, forKey: kCIInputImageKey)
+        // outputR = dot(input, RVector) + bias.x, etc. Zeroing R/G/B's input weights
+        // and setting bias.x = 1 makes outputR a *constant* 1.0 regardless of input —
+        // i.e. pure red — while G/B stay 0. outputA sums only the input R/G/B channels
+        // (not input alpha, which is ~1.0/opaque for a normal camera frame and would
+        // otherwise swamp the threshold below with a constant +1), then subtracts
+        // `threshold`: flat/non-edge regions (R+G+B ≈ 0) clamp to alpha 0 (invisible),
+        // strong edges clamp toward alpha 1 (a solid red highlight).
         colorMatrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
         colorMatrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
         colorMatrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
-        colorMatrixFilter.setValue(CIVector(x: 1, y: 1, z: 1, w: 1), forKey: "inputAVector")
-        colorMatrixFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: -CGFloat(threshold)), forKey: "inputBiasVector")
+        colorMatrixFilter.setValue(CIVector(x: 1, y: 1, z: 1, w: 0), forKey: "inputAVector")
+        colorMatrixFilter.setValue(CIVector(x: 1, y: 0, z: 0, w: -CGFloat(threshold)), forKey: "inputBiasVector")
         return colorMatrixFilter.outputImage ?? edges
     }
 }

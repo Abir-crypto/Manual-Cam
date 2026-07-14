@@ -10,10 +10,9 @@ final class CameraCoordinator: ObservableObject {
     let peakingProcessor: FocusPeakingProcessor
     let settingsStore: AppSettingsStore
 
-    @Published var captureFormat: CaptureFormat
-    @Published var isPeakingEnabled = false {
-        didSet { peakingProcessor.isEnabled = isPeakingEnabled }
-    }
+    /// Solely `settingsStore`-driven now — there's no separate top-bar session
+    /// override to reconcile with a persisted "default" anymore.
+    var captureFormat: CaptureFormat { settingsStore.defaultCaptureFormat }
 
     private var controlBarController: AnyObject?
     private var cancellables = Set<AnyCancellable>()
@@ -26,15 +25,22 @@ final class CameraCoordinator: ObservableObject {
         self.captureService = PhotoCaptureService(photoOutput: sessionManager.photoOutput)
         self.peakingProcessor = FocusPeakingProcessor()
         self.settingsStore = settingsStore
-        self.captureFormat = settingsStore.defaultCaptureFormat
 
         sessionManager.setVideoDataOutputDelegate(peakingProcessor)
         captureService.setAppleProRAWEnabled(settingsStore.appleProRAWEnabled)
 
+        // Peaking on/off is persisted in AppSettingsStore (Settings sheet) rather than a
+        // live-only coordinator flag — apply the restored value immediately, then keep
+        // the processor in sync with every subsequent change.
+        peakingProcessor.isEnabled = settingsStore.isPeakingEnabled
+        settingsStore.$isPeakingEnabled
+            .sink { [weak self] enabled in self?.peakingProcessor.isEnabled = enabled }
+            .store(in: &cancellables)
+
         // SwiftUI views only observe `coordinator` itself (@ObservedObject), not these
         // nested ObservableObjects — forward their changes so the UI actually re-renders
-        // when e.g. ManualControlEngine's ISO/shutter/etc. change.
-        for childPublisher in [sessionManager.objectWillChange, controlEngine.objectWillChange, captureService.objectWillChange, peakingProcessor.objectWillChange] {
+        // when e.g. ManualControlEngine's ISO/shutter/etc., or a Settings toggle, change.
+        for childPublisher in [sessionManager.objectWillChange, controlEngine.objectWillChange, captureService.objectWillChange, peakingProcessor.objectWillChange, settingsStore.objectWillChange] {
             childPublisher
                 .sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &cancellables)
@@ -68,15 +74,15 @@ final class CameraCoordinator: ObservableObject {
     /// Call on backgrounding/scene changes so a force-quit doesn't lose in-progress adjustments.
     func persistCurrentStateIfNeeded() {
         guard settingsStore.persistLastUsedValues else { return }
-        var state = controlEngine.currentPersistedState
-        state.captureFormat = captureFormat
-        CameraStatePersistenceStore.save(state)
+        CameraStatePersistenceStore.save(controlEngine.currentPersistedState)
     }
 
-    /// The back camera input is a single virtual multi-camera device for the whole
-    /// session lifetime (lens switching is a `videoZoomFactor` change, not a device
-    /// swap — see `CameraSessionManager.switchToLens(_:)`), so this fires once, at
-    /// launch. Kept non-`.first()`-gated defensively in case that ever changes.
+    /// Fires on initial launch *and* every subsequent lens switch that moves to a
+    /// different physical lens (`CameraSessionManager.switchToLens(_:)` swaps the
+    /// session's `AVCaptureDeviceInput` between discrete lenses — see its doc comment).
+    /// `controlEngine.attach(device:)` always runs; the one-time setup below
+    /// (persisted-value restore, Camera Control hardware bar) is separately guarded to
+    /// only run once, on the very first device.
     private func handleDeviceAttached(_ device: AVCaptureDevice) {
         controlEngine.attach(device: device)
 
@@ -85,7 +91,6 @@ final class CameraCoordinator: ObservableObject {
 
         if settingsStore.persistLastUsedValues, let saved = CameraStatePersistenceStore.load() {
             controlEngine.restore(saved)
-            captureFormat = saved.captureFormat
         }
 
         if #available(iOS 18.0, *) {

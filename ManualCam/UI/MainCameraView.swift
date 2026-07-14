@@ -4,6 +4,13 @@ import SwiftUI
 
 /// Primary camera screen composing preview, peaking overlay, value readout, manual
 /// control tabs, and capture (Task 8).
+///
+/// **Deviation from spec**: Task 8's top bar (format toggle, peaking toggle, settings
+/// gear) is gone entirely per user request — the viewfinder is now the topmost element,
+/// format + peaking live in the Settings sheet (both persisted via `AppSettingsStore`),
+/// and the capture bar's lens picker was replaced by a settings button, with lens
+/// switching promoted to its own always-visible tab row above the ISO/SHUTTER/FOCUS/WB
+/// tabs.
 struct MainCameraView: View {
     @ObservedObject var coordinator: CameraCoordinator
     @State private var activeParameter: ManualParameter = .iso
@@ -16,11 +23,10 @@ struct MainCameraView: View {
             Color.black.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                topBar
-                Spacer(minLength: 8)
                 viewfinder
                 Spacer(minLength: 8)
                 valueReadoutStrip
+                lensTabBar
                 parameterTabBar
                 parameterSlider
                     .padding(.top, 4)
@@ -68,6 +74,7 @@ struct MainCameraView: View {
 
     /// Boxed to the sensor's actual 4:3 capture ratio (3:4 in portrait) — the rest of
     /// the screen stays black rather than cropping/stretching the preview full-bleed.
+    /// Now the topmost element on screen — there's no top bar above it anymore.
     private var viewfinder: some View {
         ZStack {
             CameraPreviewView(
@@ -76,7 +83,7 @@ struct MainCameraView: View {
                 onFullPress: { capture() }
             )
 
-            if coordinator.isPeakingEnabled, let overlay = coordinator.peakingProcessor.overlayImage {
+            if coordinator.settingsStore.isPeakingEnabled, let overlay = coordinator.peakingProcessor.overlayImage {
                 Image(decorative: overlay, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
@@ -86,43 +93,6 @@ struct MainCameraView: View {
         .aspectRatio(3.0 / 4.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .clipped()
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack {
-            Button {
-                coordinator.captureFormat = coordinator.captureFormat.includesRAW ? .heicOnly : .heicPlusRAW
-            } label: {
-                Text(coordinator.captureFormat.includesRAW ? "RAW+HEIC" : "HEIC")
-                    .font(.caption.bold())
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-
-            Spacer()
-
-            Button {
-                coordinator.isPeakingEnabled.toggle()
-            } label: {
-                Image(systemName: coordinator.isPeakingEnabled ? "bolt.fill" : "bolt.slash")
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal)
-        .padding(.top, 8)
     }
 
     // MARK: - Value readout strip
@@ -140,7 +110,38 @@ struct MainCameraView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
         .background(.ultraThinMaterial, in: Capsule())
+        .padding(.top, 8)
         .padding(.bottom, 8)
+    }
+
+    // MARK: - Lens tabs
+
+    /// Styled identically to `parameterTabBar`, directly above it, so switching lenses
+    /// feels like just another parameter tab rather than a separate menu. Collapses to
+    /// nothing on single-lens devices rather than showing a redundant one-item row.
+    @ViewBuilder
+    private var lensTabBar: some View {
+        let lenses = coordinator.sessionManager.availableLenses
+        if lenses.count > 1 {
+            HStack(spacing: 0) {
+                ForEach(lenses) { lens in
+                    Button {
+                        coordinator.switchLens(lens)
+                    } label: {
+                        Text(lens.displayName)
+                            .font(.caption2.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(lens == coordinator.sessionManager.currentLens ? Color.white.opacity(0.25) : .clear)
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal)
+            .padding(.bottom, 6)
+        }
     }
 
     // MARK: - Parameter tabs
@@ -236,37 +237,16 @@ struct MainCameraView: View {
 
             Spacer()
 
-            lensSwitcher
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 8)
-    }
-
-    // MARK: - Lens switcher
-
-    @ViewBuilder
-    private var lensSwitcher: some View {
-        let lenses = coordinator.sessionManager.availableLenses
-        if lenses.count > 1 {
-            Menu {
-                ForEach(lenses) { lens in
-                    Button {
-                        coordinator.switchLens(lens)
-                    } label: {
-                        Label(lens.displayName, systemImage: lens.symbolName)
-                        if lens == coordinator.sessionManager.currentLens {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
+            Button {
+                showSettings = true
             } label: {
-                Image(systemName: coordinator.sessionManager.currentLens?.symbolName ?? "camera")
+                Image(systemName: "gearshape.fill")
                     .foregroundStyle(.white)
                     .frame(width: 44, height: 44)
                     .background(.ultraThinMaterial, in: Circle())
             }
-        } else {
-            Color.clear.frame(width: 44, height: 44)
         }
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
     }
 }

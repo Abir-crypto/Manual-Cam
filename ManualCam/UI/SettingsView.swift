@@ -1,6 +1,9 @@
 import SwiftUI
 
-/// Settings sheet: default capture format, ProRAW toggle, persistence toggle, version footer (Task 9).
+/// Settings sheet: capture format, focus peaking, ProRAW toggle, persistence toggle,
+/// version footer (Task 9). **Deviation from spec**: per user request, this is now also
+/// where capture format and focus peaking live — there's no top-bar quick toggle for
+/// either anymore, so this Form is the single, persisted source of truth for both.
 struct SettingsView: View {
     @ObservedObject var settingsStore: AppSettingsStore
     @ObservedObject var sessionManager: CameraSessionManager
@@ -10,7 +13,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section("Capture") {
-                    Picker("Default Format", selection: $settingsStore.defaultCaptureFormat) {
+                    Picker("Format", selection: $settingsStore.defaultCaptureFormat) {
                         ForEach(CaptureFormat.allCases) { format in
                             Text(format.displayName).tag(format)
                         }
@@ -19,6 +22,8 @@ struct SettingsView: View {
                     if sessionManager.isAppleProRAWSupported {
                         Toggle("Apple ProRAW", isOn: $settingsStore.appleProRAWEnabled)
                     }
+
+                    Toggle("Focus Peaking", isOn: $settingsStore.isPeakingEnabled)
                 }
 
                 Section {

@@ -91,6 +91,9 @@ nonisolated final class CameraSessionManager: ObservableObject {
                 if self.session.canAddInput(newInput) {
                     self.session.addInput(newInput)
                 }
+                // Swapping inputs recreates videoDataOutput's connection, resetting its
+                // rotation angle — reapply within the same begin/commit batch.
+                self.applyVideoDataOutputRotation(for: newDevice)
                 self.session.commitConfiguration()
                 device = newDevice
             } else if let existing = self.activeDevice {
@@ -225,6 +228,7 @@ nonisolated final class CameraSessionManager: ObservableObject {
         if session.canAddOutput(videoDataOutput) {
             session.addOutput(videoDataOutput)
         }
+        applyVideoDataOutputRotation(for: device)
 
         let rawSupported = !photoOutput.availableRawPhotoPixelFormatTypes.isEmpty
         let proRAWSupported = photoOutput.isAppleProRAWSupported
@@ -243,6 +247,23 @@ nonisolated final class CameraSessionManager: ObservableObject {
             self.availableLenses = lenses
             self.currentLens = initialLens
         }
+    }
+
+    /// Must be called on `sessionQueue`, within a begin/commit configuration batch.
+    /// `AVCaptureVideoDataOutput` delivers frames in the sensor's native (landscape)
+    /// orientation by default — unlike `AVCaptureVideoPreviewLayer`, which auto-rotates
+    /// its own contents, video data output buffers need an explicit rotation angle or
+    /// FocusPeakingProcessor's overlay comes out sideways relative to the portrait
+    /// preview it's composited over. Uses the modern `AVCaptureDevice.RotationCoordinator`
+    /// (iOS 17+) rather than a hardcoded angle, since the correct value can differ by
+    /// device/camera position.
+    @discardableResult
+    private func applyVideoDataOutputRotation(for device: AVCaptureDevice) {
+        guard let connection = videoDataOutput.connection(with: .video) else { return }
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+        guard connection.isVideoRotationAngleSupported(angle) else { return }
+        connection.videoRotationAngle = angle
     }
 
     private func publishError(_ message: String) {

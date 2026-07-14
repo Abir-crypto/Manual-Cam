@@ -105,8 +105,7 @@ nonisolated final class ManualControlEngine: ObservableObject {
             iso: iso,
             exposureDuration: exposureDuration,
             lensPosition: lensPosition,
-            whiteBalanceKelvin: whiteBalanceKelvin,
-            captureFormat: .heicOnly // caller overwrites with the actual current toggle value
+            whiteBalanceKelvin: whiteBalanceKelvin
         )
     }
 
