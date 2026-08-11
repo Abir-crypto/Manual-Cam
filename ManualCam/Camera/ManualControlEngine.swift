@@ -18,6 +18,14 @@ nonisolated final class ManualControlEngine: ObservableObject {
     private weak var device: AVCaptureDevice?
     private let queue: DispatchQueue
 
+    /// KVO tokens for tap-to-reset's "wait for auto adjustments to settle" observation
+    /// (see `tapToReset(at:)`). Retained here since `NSKeyValueObservation` invalidates
+    /// on dealloc; guarded by `tapResetLock` since the change handlers can land on
+    /// whatever internal AVFoundation thread fires the KVO notification, not necessarily
+    /// `queue`.
+    private var tapResetObservations: [NSKeyValueObservation] = []
+    private let tapResetLock = NSLock()
+
     init(queue: DispatchQueue) {
         self.queue = queue
     }
@@ -88,6 +96,136 @@ nonisolated final class ManualControlEngine: ObservableObject {
                 }
             }
         }
+    }
+
+    /// "Tap to auto-focus/expose/white-balance at a point, then keep it as the new
+    /// manual baseline" — standard point-and-shoot behavior layered on top of this
+    /// app's always-manual control model. `devicePoint` must already be in
+    /// `AVCaptureDevice` point-of-interest space (`CameraPreviewView` converts the raw
+    /// tap location via `captureDevicePointConverted(fromLayerPoint:)` before calling
+    /// this). Switches focus/exposure/white balance to their one-shot auto modes
+    /// pointed at `devicePoint`, waits for the device to finish adjusting, then reads
+    /// back wherever it settled and re-locks those exact values as the new manual
+    /// ISO/shutter/focus/white-balance — so the next slider drag continues from that
+    /// point instead of the values from before the tap.
+    func tapToReset(at devicePoint: CGPoint) {
+        queue.async { [weak self] in
+            guard let self, let device = self.device else { return }
+
+            self.withLockedConfiguration(on: device) {
+                if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+                    device.focusPointOfInterest = devicePoint
+                    device.focusMode = .autoFocus
+                }
+                if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
+                    device.exposurePointOfInterest = devicePoint
+                    device.exposureMode = .autoExpose
+                }
+                if device.isWhiteBalanceModeSupported(.autoWhiteBalance) {
+                    device.whiteBalanceMode = .autoWhiteBalance
+                }
+            }
+
+            self.waitForAutoAdjustments(on: device) { [weak self] in
+                self?.queue.async { self?.lockInSettledValues(on: device) }
+            }
+        }
+    }
+
+    /// Reads back wherever auto focus/exposure/white balance settled after
+    /// `tapToReset(at:)` and re-locks the device to those exact values (custom
+    /// exposure, locked focus, locked white balance), then publishes them so sliders
+    /// reflect the new baseline. Must run on `queue`.
+    private func lockInSettledValues(on device: AVCaptureDevice) {
+        let settledISO = clampedISO(device.iso)
+        let settledDuration = clampedDuration(device.exposureDuration)
+        let settledLensPosition = device.lensPosition
+        let settledKelvin = WhiteBalanceConverter.kelvin(forGains: device.deviceWhiteBalanceGains, device: device)
+
+        withLockedConfiguration(on: device) {
+            if device.isExposureModeSupported(.custom) {
+                device.setExposureModeCustom(duration: settledDuration, iso: settledISO, completionHandler: nil)
+            }
+            if device.isLockingFocusWithCustomLensPositionSupported {
+                device.setFocusModeLocked(lensPosition: settledLensPosition, completionHandler: nil)
+            }
+            if device.isWhiteBalanceModeSupported(.locked) {
+                let gains = WhiteBalanceConverter.gains(forKelvin: settledKelvin, device: device)
+                device.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.iso = settledISO
+            self.exposureDuration = settledDuration
+            self.lensPosition = settledLensPosition
+            self.whiteBalanceKelvin = settledKelvin
+        }
+    }
+
+    /// Observes `isAdjustingFocus`/`isAdjustingExposure`/`isAdjustingWhiteBalance` for a
+    /// genuine adjusting → settled transition, then calls `completion` exactly once.
+    ///
+    /// Deliberately does *not* treat "not adjusting" as "already settled" the instant
+    /// the observers attach — the hardware doesn't flip these flags to `true`
+    /// synchronously when the auto modes are set in `tapToReset(at:)`, so an immediate
+    /// settled-check almost always wins the race before any scan has even started,
+    /// reading back the pre-tap values as if nothing needed to change (confirmed bug:
+    /// this produced exactly that — a tap that showed the reticle but never actually
+    /// moved focus/exposure/white balance or the sliders). Instead this waits for at
+    /// least one of the three to report "adjusting" and then settle back to `false`. A
+    /// 0.35s grace period covers the case where nothing ever needs to adjust (e.g.
+    /// point-of-interest unsupported at this position, or the scene needs no
+    /// correction), so the tap still resolves into a baseline instead of waiting for a
+    /// transition that will never come. A 2s hard safety net covers a scan that starts
+    /// but never fully settles (e.g. continuous low-light exposure hunting).
+    private func waitForAutoAdjustments(on device: AVCaptureDevice, completion: @escaping () -> Void) {
+        tapResetLock.lock()
+        tapResetObservations.forEach { $0.invalidate() }
+        tapResetObservations.removeAll()
+        tapResetLock.unlock()
+
+        var didComplete = false
+        var hasSeenAdjusting = false
+
+        func isAdjusting() -> Bool {
+            device.isAdjustingFocus || device.isAdjustingExposure || device.isAdjustingWhiteBalance
+        }
+
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.tapResetLock.lock()
+            let shouldRun = !didComplete
+            didComplete = true
+            if shouldRun {
+                self.tapResetObservations.forEach { $0.invalidate() }
+                self.tapResetObservations.removeAll()
+            }
+            self.tapResetLock.unlock()
+            if shouldRun { completion() }
+        }
+
+        let handler: (AVCaptureDevice, NSKeyValueObservedChange<Bool>) -> Void = { _, _ in
+            if isAdjusting() {
+                hasSeenAdjusting = true
+            } else if hasSeenAdjusting {
+                finish()
+            }
+        }
+
+        tapResetLock.lock()
+        tapResetObservations = [
+            device.observe(\.isAdjustingFocus, changeHandler: handler),
+            device.observe(\.isAdjustingExposure, changeHandler: handler),
+            device.observe(\.isAdjustingWhiteBalance, changeHandler: handler),
+        ]
+        tapResetLock.unlock()
+
+        queue.asyncAfter(deadline: .now() + 0.35) {
+            if !hasSeenAdjusting { finish() }
+        }
+        queue.asyncAfter(deadline: .now() + 2.0, execute: finish)
     }
 
     /// Restores a full set of persisted/default values in one pass (Task 11).

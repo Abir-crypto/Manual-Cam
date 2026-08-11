@@ -1,0 +1,227 @@
+{
+  "ManualCam/Assets.xcassets/AccentColor.colorset/Contents.json": {
+    "mtime": 1783756974.890446,
+    "ast_hash": "55019f7265dde0a78318b0807f98e847",
+    "semantic_hash": "55019f7265dde0a78318b0807f98e847"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Contents.json": {
+    "mtime": 1784029100.32377,
+    "ast_hash": "51fecbed0f76d462744fed80de7e853c",
+    "semantic_hash": "51fecbed0f76d462744fed80de7e853c"
+  },
+  "ManualCam/Assets.xcassets/Contents.json": {
+    "mtime": 1783756974.8909514,
+    "ast_hash": "9deb2ada1cc834bbebf8bbad9c8978a1",
+    "semantic_hash": "9deb2ada1cc834bbebf8bbad9c8978a1"
+  },
+  "ManualCam/Camera/CameraControlBarController.swift": {
+    "mtime": 1783762036.2858045,
+    "ast_hash": "8603b42a7e36a2df0ebd62ca64417e80",
+    "semantic_hash": "8603b42a7e36a2df0ebd62ca64417e80"
+  },
+  "ManualCam/Camera/CameraCoordinator.swift": {
+    "mtime": 1784029438.1447964,
+    "ast_hash": "c8ef310e1183640527e8bbaeab532f10",
+    "semantic_hash": "c8ef310e1183640527e8bbaeab532f10"
+  },
+  "ManualCam/Camera/CameraSessionManager.swift": {
+    "mtime": 1784024588.5415719,
+    "ast_hash": "82c87c43f5fe3b374b4630843c193f48",
+    "semantic_hash": "82c87c43f5fe3b374b4630843c193f48"
+  },
+  "ManualCam/Camera/ManualControlEngine.swift": {
+    "mtime": 1784097450.0207798,
+    "ast_hash": "d277be6802fbdfc5187e13505e4d800a",
+    "semantic_hash": "d277be6802fbdfc5187e13505e4d800a"
+  },
+  "ManualCam/Camera/PhotoAlbumManager.swift": {
+    "mtime": 1783760258.16673,
+    "ast_hash": "7ac6c32d1621a049886eb2c386296793",
+    "semantic_hash": "7ac6c32d1621a049886eb2c386296793"
+  },
+  "ManualCam/Camera/PhotoCaptureService.swift": {
+    "mtime": 1784025904.3712761,
+    "ast_hash": "3c08315a8dcc843277539c564cddacc7",
+    "semantic_hash": "3c08315a8dcc843277539c564cddacc7"
+  },
+  "ManualCam/Camera/WhiteBalanceConverter.swift": {
+    "mtime": 1783758280.212319,
+    "ast_hash": "2f7868a6998a8dc18cd2ca3384dee77c",
+    "semantic_hash": "2f7868a6998a8dc18cd2ca3384dee77c"
+  },
+  "ManualCam/Gallery/GalleryView.swift": {
+    "mtime": 1783759454.7793107,
+    "ast_hash": "47b9100d3b38c722ec0949485dd9e9f5",
+    "semantic_hash": "47b9100d3b38c722ec0949485dd9e9f5"
+  },
+  "ManualCam/Gallery/PhotoDetailView.swift": {
+    "mtime": 1783757810.6069229,
+    "ast_hash": "4988dec4b11d847ac33c02d611164c2c",
+    "semantic_hash": "4988dec4b11d847ac33c02d611164c2c"
+  },
+  "ManualCam/ManualCamApp.swift": {
+    "mtime": 1783757825.6537645,
+    "ast_hash": "79e7737bcc08cf202cff5010407fb3af",
+    "semantic_hash": "79e7737bcc08cf202cff5010407fb3af"
+  },
+  "ManualCam/Models/CameraLens.swift": {
+    "mtime": 1783764439.427529,
+    "ast_hash": "10961e263e1cfbd6a1e8181c1cae45fa",
+    "semantic_hash": "10961e263e1cfbd6a1e8181c1cae45fa"
+  },
+  "ManualCam/Models/CaptureFormat.swift": {
+    "mtime": 1784025765.6211843,
+    "ast_hash": "5f8f6d99999f04ee22ca18ede2759105",
+    "semantic_hash": "5f8f6d99999f04ee22ca18ede2759105"
+  },
+  "ManualCam/Models/ManualControlRanges.swift": {
+    "mtime": 1783761961.2025006,
+    "ast_hash": "a69c369d1cd7cadf0887da37a411da36",
+    "semantic_hash": "a69c369d1cd7cadf0887da37a411da36"
+  },
+  "ManualCam/Models/ManualParameter.swift": {
+    "mtime": 1783761950.382584,
+    "ast_hash": "8f499a63383ae35e70c176e90d93dc2b",
+    "semantic_hash": "8f499a63383ae35e70c176e90d93dc2b"
+  },
+  "ManualCam/Models/PersistedCameraState.swift": {
+    "mtime": 1784024361.0456152,
+    "ast_hash": "7590f60296be679ddf95a39982ba6d1f",
+    "semantic_hash": "7590f60296be679ddf95a39982ba6d1f"
+  },
+  "ManualCam/Peaking/FocusPeakingProcessor.swift": {
+    "mtime": 1784024511.1655846,
+    "ast_hash": "6831dbdb703d83714be39682c9b459b3",
+    "semantic_hash": "6831dbdb703d83714be39682c9b459b3"
+  },
+  "ManualCam/Settings/AppSettingsStore.swift": {
+    "mtime": 1784025775.5610433,
+    "ast_hash": "184c092ea6f7a41b45fd204089f90dbf",
+    "semantic_hash": "184c092ea6f7a41b45fd204089f90dbf"
+  },
+  "ManualCam/Settings/CameraStatePersistenceStore.swift": {
+    "mtime": 1784024373.0975869,
+    "ast_hash": "c10116a92fb3f6bd5afb78726cac8adc",
+    "semantic_hash": "c10116a92fb3f6bd5afb78726cac8adc"
+  },
+  "ManualCam/UI/CameraPreviewView.swift": {
+    "mtime": 1784029427.4147651,
+    "ast_hash": "94734b2b62bc40e1024d4eddb0c238f0",
+    "semantic_hash": "94734b2b62bc40e1024d4eddb0c238f0"
+  },
+  "ManualCam/UI/CameraValueFormatting.swift": {
+    "mtime": 1783766080.6731653,
+    "ast_hash": "d724a6af91c9a56bc45a4c039760b282",
+    "semantic_hash": "d724a6af91c9a56bc45a4c039760b282"
+  },
+  "ManualCam/UI/MainCameraView.swift": {
+    "mtime": 1784097924.1511042,
+    "ast_hash": "fa53b30102e93b7bfca9713fc697245a",
+    "semantic_hash": "fa53b30102e93b7bfca9713fc697245a"
+  },
+  "ManualCam/UI/PermissionView.swift": {
+    "mtime": 1783757754.8277934,
+    "ast_hash": "fe18e16c9c125e5060e4d5edf1b0bba1",
+    "semantic_hash": "fe18e16c9c125e5060e4d5edf1b0bba1"
+  },
+  "ManualCam/UI/RootView.swift": {
+    "mtime": 1783757758.185983,
+    "ast_hash": "ce50bf0cbb33fbb7d80d2ec76e2dcf9d",
+    "semantic_hash": "ce50bf0cbb33fbb7d80d2ec76e2dcf9d"
+  },
+  "ManualCam/UI/SettingsView.swift": {
+    "mtime": 1784024620.4503248,
+    "ast_hash": "2333e53e2f069b4b6de7ce04a1d9f13d",
+    "semantic_hash": "2333e53e2f069b4b6de7ce04a1d9f13d"
+  },
+  "ManualCam/UI/WheelSlider.swift": {
+    "mtime": 1783767154.6380088,
+    "ast_hash": "f356efd57e356fd24d990c06ec9c7d1d",
+    "semantic_hash": "f356efd57e356fd24d990c06ec9c7d1d"
+  },
+  "CLAUDE.md": {
+    "mtime": 1784097950.9291925,
+    "ast_hash": "6ab8d8027c580703dd1998a763fab84e",
+    "semantic_hash": "6ab8d8027c580703dd1998a763fab84e"
+  },
+  "SPEC.md": {
+    "mtime": 1783756949.252382,
+    "ast_hash": "276491b3dd764d1a07e6c8ce720674c0",
+    "semantic_hash": "276491b3dd764d1a07e6c8ce720674c0"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@1x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "c8886b3e31cb03d5c021154244ec8505",
+    "semantic_hash": "c8886b3e31cb03d5c021154244ec8505"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "572270129cd2c013ca9261d31130832e",
+    "semantic_hash": "572270129cd2c013ca9261d31130832e"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@3x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "fbb0ddad609f71b156fac7bf1e2c2c67",
+    "semantic_hash": "fbb0ddad609f71b156fac7bf1e2c2c67"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@1x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "1958f56c4f8779a61cbc17af12ece0bd",
+    "semantic_hash": "1958f56c4f8779a61cbc17af12ece0bd"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "7280d67ce100aebe4bb6fa3d33630936",
+    "semantic_hash": "7280d67ce100aebe4bb6fa3d33630936"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-29x29@3x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "89dc387807676a5d07dbe9f213515c77",
+    "semantic_hash": "89dc387807676a5d07dbe9f213515c77"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@1x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "572270129cd2c013ca9261d31130832e",
+    "semantic_hash": "572270129cd2c013ca9261d31130832e"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "41fdb426574f3a7f975528b80e409ce3",
+    "semantic_hash": "41fdb426574f3a7f975528b80e409ce3"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-40x40@3x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "860a8d21ab11f6d1491141fb7d5dec0c",
+    "semantic_hash": "860a8d21ab11f6d1491141fb7d5dec0c"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "860a8d21ab11f6d1491141fb7d5dec0c",
+    "semantic_hash": "860a8d21ab11f6d1491141fb7d5dec0c"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-60x60@3x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "5889491268534410e51d120f961c31d3",
+    "semantic_hash": "5889491268534410e51d120f961c31d3"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@1x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "1c103247ff07e2ab12a42a6c8f0bf067",
+    "semantic_hash": "1c103247ff07e2ab12a42a6c8f0bf067"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-76x76@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "0ddec43810fcd0bdd767411529e943bd",
+    "semantic_hash": "0ddec43810fcd0bdd767411529e943bd"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/Icon-App-83.5x83.5@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "596044834741de7b872ae6c1b98985f9",
+    "semantic_hash": "596044834741de7b872ae6c1b98985f9"
+  },
+  "ManualCam/Assets.xcassets/AppIcon.appiconset/ItunesArtwork@2x.png": {
+    "mtime": 1784007394.0,
+    "ast_hash": "3b2018bd8afe3a238bb7efd46e2d5355",
+    "semantic_hash": "3b2018bd8afe3a238bb7efd46e2d5355"
+  }
+}

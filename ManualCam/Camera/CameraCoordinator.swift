@@ -9,6 +9,7 @@ final class CameraCoordinator: ObservableObject {
     let captureService: PhotoCaptureService
     let peakingProcessor: FocusPeakingProcessor
     let settingsStore: AppSettingsStore
+    let intervalometer: IntervalometerService
 
     /// Solely `settingsStore`-driven now — there's no separate top-bar session
     /// override to reconcile with a persisted "default" anymore.
@@ -25,6 +26,7 @@ final class CameraCoordinator: ObservableObject {
         self.captureService = PhotoCaptureService(photoOutput: sessionManager.photoOutput)
         self.peakingProcessor = FocusPeakingProcessor()
         self.settingsStore = settingsStore
+        self.intervalometer = IntervalometerService()
 
         sessionManager.setVideoDataOutputDelegate(peakingProcessor)
         captureService.setAppleProRAWEnabled(settingsStore.appleProRAWEnabled)
@@ -40,7 +42,7 @@ final class CameraCoordinator: ObservableObject {
         // SwiftUI views only observe `coordinator` itself (@ObservedObject), not these
         // nested ObservableObjects — forward their changes so the UI actually re-renders
         // when e.g. ManualControlEngine's ISO/shutter/etc., or a Settings toggle, change.
-        for childPublisher in [sessionManager.objectWillChange, controlEngine.objectWillChange, captureService.objectWillChange, peakingProcessor.objectWillChange, settingsStore.objectWillChange] {
+        for childPublisher in [sessionManager.objectWillChange, controlEngine.objectWillChange, captureService.objectWillChange, peakingProcessor.objectWillChange, settingsStore.objectWillChange, intervalometer.objectWillChange] {
             childPublisher
                 .sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &cancellables)
@@ -66,9 +68,28 @@ final class CameraCoordinator: ObservableObject {
         captureService.capturePhoto(format: captureFormat)
     }
 
+    /// Start a Multi-Shot Timer run with the given configuration (Manual mode only). The
+    /// config is remembered for next time, and each shot fires the same `capturePhoto()`
+    /// the manual shutter uses — so the RAW/HEIC setting and album are respected, and the
+    /// manual ISO/shutter/focus/WB locked in when Start was tapped carry across the run.
+    func startTimer(config: TimerConfiguration) {
+        settingsStore.timerConfiguration = config
+        intervalometer.start(config: config) { [weak self] in
+            self?.capturePhoto()
+        }
+    }
+
     /// Switches to a different zoom/lens preset (ultra wide/wide/telephoto/etc).
     func switchLens(_ lens: CameraLens) {
         sessionManager.switchToLens(lens)
+    }
+
+    /// "Tap to auto-focus/expose/white-balance at a point, then keep it as the new
+    /// manual baseline" (point-and-shoot behavior on top of the always-manual control
+    /// model). `devicePoint` must already be in `AVCaptureDevice` point-of-interest
+    /// space — `CameraPreviewView` converts the raw tap location before calling this.
+    func tapToFocus(at devicePoint: CGPoint) {
+        controlEngine.tapToReset(at: devicePoint)
     }
 
     /// Call on backgrounding/scene changes so a force-quit doesn't lose in-progress adjustments.

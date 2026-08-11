@@ -8,6 +8,9 @@ final class AppSettingsStore: ObservableObject {
         static let appleProRAWEnabled = "AppSettingsStore.appleProRAWEnabled"
         static let persistLastUsedValues = "AppSettingsStore.persistLastUsedValues"
         static let isPeakingEnabled = "AppSettingsStore.isPeakingEnabled"
+        static let timerInitialDelay = "AppSettingsStore.timerInitialDelay"
+        static let timerShotCount = "AppSettingsStore.timerShotCount"
+        static let timerInterval = "AppSettingsStore.timerInterval"
     }
 
     private let defaults: UserDefaults
@@ -27,6 +30,15 @@ final class AppSettingsStore: ObservableObject {
     @Published var isPeakingEnabled: Bool {
         didSet { defaults.set(isPeakingEnabled, forKey: Keys.isPeakingEnabled) }
     }
+    /// Last-used Multi-Shot Timer settings, remembered across launches (same UserDefaults
+    /// pattern as the rest of the store). Seeds the timer setup sheet each time it opens.
+    @Published var timerConfiguration: TimerConfiguration {
+        didSet {
+            defaults.set(timerConfiguration.initialDelay, forKey: Keys.timerInitialDelay)
+            defaults.set(timerConfiguration.shotCount, forKey: Keys.timerShotCount)
+            defaults.set(timerConfiguration.interval, forKey: Keys.timerInterval)
+        }
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -35,5 +47,10 @@ final class AppSettingsStore: ObservableObject {
         appleProRAWEnabled = defaults.bool(forKey: Keys.appleProRAWEnabled)
         persistLastUsedValues = defaults.object(forKey: Keys.persistLastUsedValues) as? Bool ?? true
         isPeakingEnabled = defaults.bool(forKey: Keys.isPeakingEnabled)
+        timerConfiguration = TimerConfiguration(
+            initialDelay: defaults.object(forKey: Keys.timerInitialDelay) as? Int ?? TimerConfiguration.default.initialDelay,
+            shotCount: defaults.object(forKey: Keys.timerShotCount) as? Int ?? TimerConfiguration.default.shotCount,
+            interval: defaults.object(forKey: Keys.timerInterval) as? Int ?? TimerConfiguration.default.interval
+        ).clamped()
     }
 }

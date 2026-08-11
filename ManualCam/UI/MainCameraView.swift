@@ -17,6 +17,10 @@ struct MainCameraView: View {
     @State private var showSettings = false
     @State private var showGallery = false
     @State private var showThumbnail = false
+    @State private var focusIndicatorPoint: CGPoint?
+    @State private var focusIndicatorOpacity: Double = 0
+    @State private var showCaptureOptions = false
+    @State private var showTimerSetup = false
 
     var body: some View {
         ZStack {
@@ -33,7 +37,15 @@ struct MainCameraView: View {
                 captureBar
             }
             .padding(.bottom, 12)
+
+            if coordinator.intervalometer.isRunning {
+                IntervalometerOverlay(service: coordinator.intervalometer)
+            }
         }
+        // Disabled per user request — kept for possible future use, not deleted.
+        // .overlay(alignment: .top) {
+        //     topCornerButtons
+        // }
         .statusBarHidden()
         .sheet(isPresented: $showSettings) {
             SettingsView(settingsStore: coordinator.settingsStore, sessionManager: coordinator.sessionManager)
@@ -41,8 +53,34 @@ struct MainCameraView: View {
         .sheet(isPresented: $showGallery) {
             GalleryView()
         }
+        .sheet(isPresented: $showCaptureOptions) {
+            CaptureOptionsSheet(onTimer: {
+                // Hand off from the ⋯ sheet to the timer setup sheet: dismiss this one
+                // first, then present the next on the following runloop tick so the two
+                // sheet transitions don't collide.
+                showCaptureOptions = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { showTimerSetup = true }
+            })
+                .presentationDetents([.height(150)])
+                .presentationDragIndicator(.hidden)
+        }
+        .sheet(isPresented: $showTimerSetup) {
+            TimerSetupSheet(config: coordinator.settingsStore.timerConfiguration) { config in
+                coordinator.startTimer(config: config)
+            }
+        }
         .onChange(of: coordinator.captureService.lastCaptureThumbnail) { _, newValue in
             guard newValue != nil else { return }
+            // During a timer run, per-shot thumbnails are suppressed; the run's final
+            // shot reveals its thumbnail once the run ends (see the isRunning onChange).
+            guard !coordinator.intervalometer.isRunning else { return }
+            showThumbnail = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showThumbnail = false }
+        }
+        .onChange(of: coordinator.intervalometer.isRunning) { _, isRunning in
+            // Run just ended (finished or cancelled): reveal one thumbnail flash for the
+            // last captured shot, if any.
+            guard !isRunning, coordinator.captureService.lastCaptureThumbnail != nil else { return }
             showThumbnail = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showThumbnail = false }
         }
@@ -70,6 +108,40 @@ struct MainCameraView: View {
         coordinator.capturePhoto()
     }
 
+    // MARK: - Top corner buttons
+
+    /// Demo placeholders in the empty space flanking the notch/Dynamic Island —
+    /// functions to be wired up later. Deliberately an overlay on the outer `ZStack`,
+    /// not part of the main `VStack`, so it doesn't push the viewfinder down; ignores
+    /// the top safe area so it can actually sit level with the notch/island instead of
+    /// being pushed below it.
+    ///
+    /// **Disabled per user request** (not deleted — may be needed again later): the
+    /// `.overlay` that attaches this to `body` is commented out above. Left as dead
+    /// code intentionally; expect an "unused" build warning until it's reattached.
+    private var topCornerButtons: some View {
+        HStack {
+            topCornerButton(label: "1")
+            Spacer()
+            topCornerButton(label: "2")
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .ignoresSafeArea(edges: .top)
+    }
+
+    private func topCornerButton(label: String) -> some View {
+        Button {
+            // Placeholder — behavior to be added later.
+        } label: {
+            Text(label)
+                .font(.caption.bold())
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+    }
+
     // MARK: - Viewfinder
 
     /// Boxed to the sensor's actual 4:3 capture ratio (3:4 in portrait) — the rest of
@@ -80,7 +152,8 @@ struct MainCameraView: View {
             CameraPreviewView(
                 session: coordinator.sessionManager.session,
                 onLightPress: { coordinator.controlEngine.setLensPosition(coordinator.controlEngine.lensPosition) },
-                onFullPress: { capture() }
+                onFullPress: { capture() },
+                onTap: { viewPoint, devicePoint in handleTapToFocus(viewPoint: viewPoint, devicePoint: devicePoint) }
             )
 
             if coordinator.settingsStore.isPeakingEnabled, let overlay = coordinator.peakingProcessor.overlayImage {
@@ -89,15 +162,51 @@ struct MainCameraView: View {
                     .aspectRatio(contentMode: .fit)
                     .allowsHitTesting(false)
             }
+
+            if let point = focusIndicatorPoint {
+                FocusReticle()
+                    .position(point)
+                    .opacity(focusIndicatorOpacity)
+                    .allowsHitTesting(false)
+            }
         }
         .aspectRatio(3.0 / 4.0, contentMode: .fit)
         .frame(maxWidth: .infinity)
         .clipped()
     }
 
+    /// Point-and-shoot tap-to-focus: resets focus/ISO/shutter/white-balance to
+    /// auto-metered values at the tapped point (`ManualControlEngine.tapToReset(at:)`),
+    /// which then become the new baseline for further manual slider adjustment. Shows a
+    /// brief reticle at the tap location purely as UI feedback — `viewPoint` (view-local)
+    /// positions it, `devicePoint` (already converted to `AVCaptureDevice`
+    /// point-of-interest space by `CameraPreviewView`) drives the actual device call.
+    private func handleTapToFocus(viewPoint: CGPoint, devicePoint: CGPoint) {
+        coordinator.tapToFocus(at: devicePoint)
+
+        focusIndicatorPoint = viewPoint
+        focusIndicatorOpacity = 1
+        withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
+            focusIndicatorOpacity = 0
+        }
+    }
+
     // MARK: - Value readout strip
 
+    /// Left-aligned value capsule + a right-aligned options button in one row,
+    /// rather than the capsule alone centered — per user request.
     private var valueReadoutStrip: some View {
+        HStack {
+            valueReadoutCapsule
+            Spacer()
+            captureOptionsButton
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+    }
+
+    private var valueReadoutCapsule: some View {
         HStack(spacing: 12) {
             Text(CameraValueFormatting.iso(coordinator.controlEngine.iso))
             Divider().frame(height: 12).overlay(.white.opacity(0.4))
@@ -110,8 +219,22 @@ struct MainCameraView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
         .background(.ultraThinMaterial, in: Capsule())
-        .padding(.top, 8)
-        .padding(.bottom, 8)
+    }
+
+    /// Pulls up `CaptureOptionsSheet` — Timer/Portrait/Astro/etc. — as a small
+    /// bottom sheet rather than a full-height one. Wider than tall (a capsule, not a
+    /// circle) per user request, to stand apart from the circular gear/thumbnail
+    /// buttons elsewhere on screen.
+    private var captureOptionsButton: some View {
+        Button {
+            showCaptureOptions = true
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.subheadline.bold())
+                .foregroundStyle(.white)
+                .frame(width: 64, height: 36)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
     }
 
     // MARK: - Lens tabs
@@ -248,5 +371,58 @@ struct MainCameraView: View {
         }
         .padding(.horizontal, 24)
         .padding(.top, 8)
+    }
+}
+
+/// Tap-to-focus reticle — brief visual feedback only, purely cosmetic (the actual
+/// focus/exposure/white-balance reset happens via `ManualControlEngine.tapToReset(at:)`
+/// regardless of whether this is ever seen).
+private struct FocusReticle: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4)
+            .stroke(Color.yellow, lineWidth: 1.5)
+            .frame(width: 70, height: 70)
+    }
+}
+
+/// Small bottom sheet pulled up by the capture options button (⋯) next to the value
+/// readout strip. Tiles are currently no-op placeholders — capture modes (Timer,
+/// Portrait, Astro, etc.) to be wired up later, same as `topCornerButtons`. A plain
+/// centered `HStack` rather than a full-width grid, and no `maxHeight: .infinity`/
+/// trailing `Spacer` — both per user request, so the sheet hugs the tiles' own
+/// height instead of stretching to fill a taller sheet, and the tile row sits
+/// centered in the middle of the sheet rather than spread edge-to-edge.
+private struct CaptureOptionsSheet: View {
+    /// Called when the Timer tile is tapped. Portrait/Astro stay no-op placeholders until
+    /// those modes are built (see PORTRAIT_MODE.md / ASTRO_MODE.md).
+    let onTimer: () -> Void
+
+    private var options: [(icon: String, label: String, action: () -> Void)] {
+        [
+            ("timer", "Timer", onTimer),
+            ("person.crop.rectangle", "Portrait", {}),
+            ("moon.stars.fill", "Astro", {}),
+        ]
+    }
+
+    var body: some View {
+        HStack(spacing: 20) {
+            ForEach(options, id: \.label) { option in
+                Button(action: option.action) {
+                    VStack(spacing: 8) {
+                        Image(systemName: option.icon)
+                            .font(.title2)
+                            .frame(width: 60, height: 60)
+                            .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                        Text(option.label)
+                            .font(.caption)
+                    }
+                }
+                .foregroundStyle(.white)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .background(Color(white: 0.1))
     }
 }

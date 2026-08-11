@@ -31,6 +31,107 @@ Folder structure (per `SPEC.md`):
                  PersistedCameraState
 ```
 
+### Planned feature specs
+
+Three additional spec files live at the repo root and extend the base `SPEC.md`. Multi-Shot
+Timer is now implemented (details below); Portrait and Astro are **not yet implemented**. Treat
+each file as the source of truth for its feature, the same way `SPEC.md` is for the base app,
+and consult the file itself before building/changing any of it. Key decisions and constraints,
+so they persist across sessions:
+
+- **`PORTRAIT_MODE.md`** — a new top-level shooting mode (Manual / **Portrait** / Astro).
+  Captures depth map + portrait matte + `.skin` semantic segmentation matte alongside a
+  HEIC, then renders bokeh in **post-capture** processing (never live). Manual controls are
+  **hidden** in this mode, replaced by a Portrait control bar (depth-debug toggle, film-style
+  picker, blur-intensity slider, shutter). Device-gated to dual/triple-camera iPhones
+  (`.builtInDualCamera`/`.builtInDualWideCamera`/`.builtInTripleCamera`) — hide the entry on
+  unsupported devices. Render pipeline: `CIDepthBlurEffect` (depth+matte+calibration, aperture
+  from slider) → radial swirl twist on the **background only** (matte-inverted, twist rising
+  toward edges) → composite subject back on top via matte. Four film styles — Natural
+  (passthrough), Golden Hour, Teal Frost, Noir — as Core Image grade chains applied to the
+  **final composite**. Baked-in (no UI toggle): skin smoothing via the skin matte (~30–40%
+  blend) and edge softness (small fixed blur on the matte before compositing). Saves **two**
+  files per shot: final styled HEIC + the original unprocessed capture. Degrade to depth-only
+  blur when no person/matte is detected. Honest approximation, **not** a clone of Apple
+  Portrait Lighting (no true face-relighting ML). Out of scope: true relighting, bladed/hex
+  bokeh shapes, live full-quality bokeh preview, user-facing skin/edge controls.
+
+- **`ASTRO_MODE.md`** — a new top-level mode (Manual / Portrait / **Astro**). A **manual
+  exposure-stacking** tool (real DSLR astro workflow), **not** an auto Night Mode — and it
+  subsumes Night Mode (small shot count covers general low-light). Unlike Portrait, manual
+  controls **stay visible and active**; Astro adds an **additional** panel on top (shot-count
+  stepper, Average / Lighten-Max blend picker, Handheld / Tripod align picker, a "Start Stack"
+  button replacing the shutter). Core module `StackCaptureEngine`: state machine `idle →
+  capturing(N/total) → aligning → stacking → done`; fires `PhotoCaptureService` sequentially at
+  the manual settings **locked at run start** (slider changes mid-run ignored); every RAW frame
+  is archived to the album, but stacking math uses the **processed (HEIC) buffer**, not RAW
+  (on-device demosaic of N frames is too heavy). Alignment via Vision — `VNHomographicImageRegistrationRequest`
+  (Handheld) or cheaper `VNTranslationalImageRegistrationRequest` (Tripod), each frame aligned
+  to the first. **Memory-safe incremental accumulation**: one 32-bit-float vImage accumulator
+  sized to a single frame, blend each aligned frame in then release it — never hold all N;
+  normalize once at end (Average). Blend modes: Average (running mean, noise reduction) and
+  Lighten/Max (brightest-per-pixel, star trails). No live progressive preview; show progress
+  only, reveal final on `done`. Cancel mid-run still stacks the frames captured so far. Optional
+  CoreMotion tripod-stillness check = advisory warning after the run, never a hard gate. Out of
+  scope: separate Night Mode UI, live stack preview, true plate-solving/per-star alignment,
+  dark-frame subtraction, on-device RAW demosaic for the stack.
+
+- **`MULTI_SHOT_TIMER.md`** — an intervalometer, a shooting aid usable **only in Manual mode**
+  (not Portrait, not Astro). ✅ **Implemented** (not yet build-verified in Xcode — same
+  Command-Line-Tools-only caveat as the rest of the app). Spec text on this feature predates two
+  UI/behavior facts and was adapted accordingly (see the implementation notes below):
+  it says "timer icon in Manual's top bar" (no top bar exists) and "RAW/HEIC **twin**
+  based on the top-bar toggle" (format is now the single mutually-exclusive
+  `settingsStore.defaultCaptureFormat`), and lists EV among the frozen settings (EV was removed).
+  What the feature does: an initial delay (0–60s), shot count (1–50), interval (1–60s); "Start"
+  freezes the current manual settings and runs a countdown overlay firing N independent captures.
+  Out of scope (unchanged): any tie-in with Astro's stacking engine, blending timer shots,
+  remote/external triggers (Watch, Bluetooth shutter).
+
+  Implementation notes (decisions made with the user before building):
+  - **Entry point** — no top bar, so the timer lives behind the existing capture-options (⋯)
+    button next to `valueReadoutStrip`: tapping the **Timer tile** in `CaptureOptionsSheet`
+    dismisses it and presents `TimerSetupSheet` (the two-sheet handoff is sequenced with a ~0.15s
+    delay so the transitions don't collide). `CaptureOptionsSheet` gained an `onTimer` closure;
+    its Portrait/Astro tiles stay no-op placeholders until those modes are built.
+  - **`TimerConfiguration`** (`/Models`) — `initialDelay`/`shotCount`/`interval` with the ranges
+    above + `.clamped()`. Last-used config is persisted in `AppSettingsStore.timerConfiguration`
+    (three `UserDefaults` Int keys), seeding the setup sheet each open — same pattern as the rest
+    of the store.
+  - **`IntervalometerService`** (`/Camera`, `ObservableObject`, MainActor-default) — drives
+    `idle → countdown → capture(flash) → countdown → … → done` with a 1 Hz `Timer` on the main
+    run loop. Publishes `isRunning`/`currentShot`/`totalShots`/`secondsRemaining`/`isCapturing`.
+    Each shot calls the **same** `CameraCoordinator.capturePhoto()` the manual shutter uses (via
+    a closure passed to `start`), so RAW/HEIC + album destination are respected and there's no
+    duplicate capture path. "Settings frozen for the run" is achieved implicitly — the countdown
+    overlay covers the controls, and the app is always in manual `.custom` mode anyway, so no
+    extra engine lock was added. Sets `UIApplication.shared.isIdleTimerDisabled` for the run so
+    the screen doesn't sleep while the user steps away. `cancel()` stops immediately; shots
+    already taken stay saved.
+  - **Audio** (`TimerAudioCuePlayer`, `/Camera`) — **respects the silent switch** (explicit user
+    choice): `AVAudioSession` category `.ambient` + `.mixWithOthers` (iOS silences ambient on
+    mute and mixes rather than interrupting other audio). No bundled sound assets — three cues
+    (beep 880 Hz, higher "final" beep 1320 Hz at 1s-to-go, distinct lower shutter 320 Hz) are
+    **synthesized sine tones** written to in-memory 16-bit PCM WAV `Data` and played via
+    `AVAudioPlayer`. Rising beeps play in the last 3 s before **every** shot.
+  - **Countdown UI** (`IntervalometerOverlay`, `/UI`) — big center numeral + "Shot X of N" +
+    always-visible Cancel, over a translucent scrim (viewfinder shows through) that captures taps
+    so the controls beneath are locked; a white full-screen pulse flashes at each shot fire.
+  - **Per-shot feedback** — per user choice, the normal per-shot thumbnail flash is **suppressed
+    during a run** (`MainCameraView`'s `lastCaptureThumbnail` `onChange` early-returns while
+    `intervalometer.isRunning`); one thumbnail is revealed at the end via an `onChange` on
+    `isRunning` flipping false.
+  - **Coordinator wiring** — `CameraCoordinator` owns `intervalometer`, forwards its
+    `objectWillChange` (added to the nested-`ObservableObject` forwarding list — required or the
+    overlay wouldn't re-render), and exposes `startTimer(config:)` which persists the config then
+    starts the run.
+
+Note: these three spec files predate some base-app deviations recorded below and still reference
+features the shipped app has since changed — e.g. a RAW+HEIC "twin" capture (now two mutually
+exclusive modes) and an EV/exposure-bias control (removed entirely). When implementing, follow
+the base-app deviations in this CLAUDE.md over the specs' stale assumptions on those specific
+points.
+
 ### Concurrency model
 
 The project sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — every type is implicitly
@@ -165,6 +266,36 @@ These are explicit product decisions — don't "improve" past them:
   - White balance is modeled as a single Kelvin value at the UI/engine layer, converted
     to device gains via `temperatureAndTintValues`/`deviceWhiteBalanceGains(for:)`, and
     clamped to `maxWhiteBalanceGain` before every apply (out-of-range gains crash).
+  - **`tapToReset(at devicePoint:)`** is tap-to-focus/expose/white-balance, point-and-shoot
+    style, layered on top of the always-manual model per user request ("tap to reset my
+    focus, iso, shutter speed, White balance for that point then change anything that I
+    want from that point"). It does not switch the app into an auto mode permanently: it
+    sets `focusPointOfInterest`/`exposurePointOfInterest` to the tapped point and flips
+    focus/exposure/white balance to their one-shot auto modes (`.autoFocus`/
+    `.autoExpose`/`.autoWhiteBalance`), waits for the device to finish adjusting, then
+    reads back wherever it settled (`device.iso`/`.exposureDuration`/`.lensPosition`/
+    `.deviceWhiteBalanceGains` → Kelvin via `WhiteBalanceConverter`) and immediately
+    re-locks the device to those exact values via the same `.custom`/`.locked` calls the
+    sliders use — so the tap becomes a new manual baseline, not a standing auto mode.
+    "Waits for the device to finish adjusting" is real KVO, not a fixed delay: observes
+    `isAdjustingFocus`/`isAdjustingExposure`/`isAdjustingWhiteBalance` (all three
+    KVO-observable per the SDK header) for a genuine adjusting → settled transition.
+    **Confirmed bug, fixed**: the first version treated "not currently adjusting" as
+    "already settled" the instant the observers attached, and called that its signal
+    to read back and lock in values. But the hardware doesn't flip these flags to
+    `true` synchronously the moment the auto modes are set — there's a brief real-world
+    delay before a scan actually starts — so that check almost always won the race
+    before anything had moved, silently re-locking the exact pre-tap values. Symptom:
+    tapping showed the reticle but nothing about focus/exposure/white balance or the
+    sliders ever actually changed. Fixed by waiting for at least one of the three to
+    report `true` (adjusting) and then fall back to `false`, with a 0.35s grace period
+    to settle immediately if nothing ever starts adjusting (e.g. point-of-interest
+    unsupported at that position, or the scene needs no correction), plus a 2s hard
+    safety-net timeout in case a started scan never fully settles (e.g. low-light
+    exposure hunting). KVO change handlers can land on an arbitrary AVFoundation
+    thread, not `queue`, so the observation tokens are guarded by a dedicated `NSLock`
+    and the actual read-back/relock
+    always hops back onto `queue` before touching the device again.
 - **`PhotoCaptureService`** wraps `AVCapturePhotoOutput` capture + `AVCapturePhotoCaptureDelegate`,
   builds HEIC-or-RAW settings (mutually exclusive — see the `CaptureFormat` deviation
   above), and writes the result to the app's dedicated `PHPhotoLibrary` album (created
@@ -246,6 +377,16 @@ These are explicit product decisions — don't "improve" past them:
   stack, rather than overlaid on top of a full-bleed preview. The viewfinder is the
   topmost element on screen — see the Task 8/9 restructuring deviation below for why
   there's no top bar above it anymore.
+  A `UITapGestureRecognizer` on the wrapped `PreviewUIView` (bridged via a
+  `UIViewRepresentable` `Coordinator`, since UIKit target/action needs an `NSObject` to
+  target) drives tap-to-focus: on tap, it converts the tap location via
+  `videoPreviewLayer.captureDevicePointConverted(fromLayerPoint:)` into
+  `AVCaptureDevice` point-of-interest space and passes both that device-space point and
+  the raw view-local point out through `onTap`. `MainCameraView` uses the device point
+  to call `CameraCoordinator.tapToFocus(at:)` → `ManualControlEngine.tapToReset(at:)`
+  (see above), and the view-local point purely to position a brief `FocusReticle`
+  (cosmetic feedback only — the actual reset works identically whether or not the
+  reticle is ever seen).
 - **`WheelSlider`** (replaces Task 8's plain `Slider` + numeric + range-bar spec) is a
   custom horizontal tick-ruler control per user request, styled from a reference
   screenshot (thin compact ticks, red fixed-center marker, no permanently visible
@@ -316,3 +457,31 @@ These are explicit product decisions — don't "improve" past them:
     lens switching moved to its own always-visible tab row (`MainCameraView.lensTabBar`,
     styled identically to `parameterTabBar`) directly above the ISO/SHUTTER/FOCUS/WB tabs,
     collapsing to nothing on single-lens devices rather than showing a redundant row.
+  - `MainCameraView.topCornerButtons` — two placeholder buttons (no-op, labeled
+    "1"/"2") in the empty space flanking the notch/Dynamic Island, per user request,
+    without pushing the viewfinder down or bringing back a top bar. Applied as an
+    `.overlay(alignment: .top)` on the outer `ZStack` rather than a row inside the
+    main `VStack` — an overlay doesn't participate in the `VStack`'s layout, so it
+    can't affect the viewfinder's position. The overlay content itself uses
+    `.ignoresSafeArea(edges: .top)` so it can sit level with the notch/island (which is
+    physically *inside* the top safe area exclusion band) rather than being pushed
+    below it like the rest of the screen's content. **Currently disabled** — per a
+    later user request ("comment them out, I might need them in the future"), the
+    `.overlay` call in `body` is commented out, but `topCornerButtons`/
+    `topCornerButton(label:)` themselves are left in place as dead code rather than
+    deleted, so re-enabling later is a one-line uncomment. Expect an "unused" build
+    warning until then.
+  - `MainCameraView.valueReadoutStrip` was restructured per user request from a single
+    centered capsule into an `HStack` with the ISO/shutter/WB capsule
+    (`valueReadoutCapsule`) on the left, a `Spacer()`, and a new `captureOptionsButton`
+    (⋯) on the right — a `Capsule`, not a `Circle` (64×36pt, wider than tall per user
+    request), to stand apart from the circular gear/thumbnail buttons elsewhere on
+    screen. Tapping it presents `CaptureOptionsSheet` — a small bottom sheet
+    (`.presentationDetents([.height(150)])`, drag indicator hidden — shrunk from an
+    initial 260pt to closely hug the tile row's own height, per user request) laid
+    out as a centered `HStack` of icon-over-label tiles (no `maxHeight: .infinity`/
+    trailing `Spacer`, so the sheet doesn't stretch past the tiles; replaced an
+    earlier `LazyVGrid` version that spread tiles edge-to-edge instead of grouping
+    them in the middle) listing capture mode placeholders (Timer,
+    Portrait, Astro) as no-op buttons, same
+    wire-up-later pattern as `topCornerButtons`.
