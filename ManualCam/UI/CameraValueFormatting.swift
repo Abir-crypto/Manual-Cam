@@ -23,4 +23,12 @@ enum CameraValueFormatting {
     static func focus(_ value: Float) -> String {
         String(format: "%.0f%%", value * 100)
     }
+
+    /// Focus with a short label, for the always-visible readout strip — there the value has
+    /// no active-tab context to disambiguate it, unlike the slider's floating label.
+    /// Deliberately not abbreviated to "F": that reads as an f-number to a photographer,
+    /// and aperture is fixed on iPhone hardware (this app doesn't control it).
+    static func focusLabeled(_ value: Float) -> String {
+        "FOC \(focus(value))"
+    }
 }

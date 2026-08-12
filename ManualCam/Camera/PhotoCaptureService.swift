@@ -11,9 +11,25 @@ import Combine
 final class PhotoCaptureService: NSObject, ObservableObject {
     @Published private(set) var lastCaptureThumbnail: UIImage?
     @Published private(set) var lastCaptureError: String?
+    /// What the most recent Portrait capture delivered (`PORTRAIT_MODE.md` Task 2). Nil until
+    /// the first Portrait shot of the session.
+    @Published private(set) var lastPortraitDiagnostics: PortraitCaptureDiagnostics?
+    /// True while a Portrait shot is being rendered (`PORTRAIT_MODE.md` Task 4: "there will be a
+    /// brief 'processing' state on the thumbnail ... since this isn't instant like a normal HEIC
+    /// capture"). The bokeh render is seconds of Core Image work on a full-resolution frame.
+    @Published private(set) var isRenderingPortrait = false
 
     private let photoOutput: AVCapturePhotoOutput
-    private var appleProRAWEnabled = false
+
+    /// Portrait render settings, snapshotted per shot from the coordinator (see
+    /// `capturePortraitPhoto(blurIntensity:style:)`) so a slider moved while a render is in flight
+    /// can't change the frame already being processed.
+    nonisolated(unsafe) private let renderer = PortraitRenderer()
+    /// Bokeh rendering is heavy, full-resolution Core Image work — it runs here rather than on the
+    /// delegate's own queue so it can't stall subsequent capture callbacks. No `nonisolated(unsafe)`
+    /// needed despite being read from nonisolated delegate callbacks: an immutable `let` of a
+    /// `Sendable` type is already reachable from any context.
+    private let renderQueue = DispatchQueue(label: "com.manualcam.portraitRenderQueue", qos: .userInitiated)
 
     /// One capture in flight always yields exactly one `didFinishProcessingPhoto`
     /// callback now that HEIC and RAW are mutually exclusive (no more twin capture),
@@ -22,6 +38,17 @@ final class PhotoCaptureService: NSObject, ObservableObject {
     private struct InFlightCapture {
         var data: Data?
         var isRAW = false
+        /// Portrait captures report what depth/matte data actually arrived — see
+        /// `PortraitCaptureDiagnostics`. Nil for ordinary Manual captures.
+        var portraitDiagnostics: PortraitCaptureDiagnostics?
+        /// Render settings snapshotted at shutter time and carried with the shot, so moving the
+        /// blur slider or changing style during a multi-second render can't retroactively change
+        /// the frame already being processed. Nil for ordinary Manual captures.
+        var portraitBlurIntensity: Double?
+        var portraitStyle: FilmStyle?
+        /// Retained so the render can run in `didFinishCaptureFor`, after the capture pipeline has
+        /// finished with the shot, rather than blocking the processing callback.
+        var portraitPhoto: AVCapturePhoto?
     }
     /// `AVCapturePhotoCaptureDelegate` callbacks land on an AVFoundation-internal queue,
     /// concurrent with `capturePhoto(format:)` calls from the main thread — all access
@@ -37,24 +64,28 @@ final class PhotoCaptureService: NSObject, ObservableObject {
         lastCaptureError = nil
     }
 
-    func setAppleProRAWEnabled(_ enabled: Bool) {
-        guard photoOutput.isAppleProRAWSupported else { return }
-        photoOutput.isAppleProRAWEnabled = enabled
-        appleProRAWEnabled = enabled
-    }
-
-    func capturePhoto(format: CaptureFormat) {
+    /// `videoZoomFactor` is the zoom currently applied to the active device — required, not optional,
+    /// because Bayer RAW is only legal at 1.0 and requesting it while zoomed throws
+    /// `NSInvalidArgumentException`. See `RAWPixelFormatRule`.
+    func capturePhoto(format: CaptureFormat, videoZoomFactor: CGFloat) {
         let settings: AVCapturePhotoSettings
 
         switch format {
         case .heic:
             settings = AVCapturePhotoSettings()
-        case .raw:
-            if let rawFormat = preferredRawPixelFormatType() {
+        case .raw, .appleProRAW:
+            if let rawFormat = preferredRawPixelFormatType(
+                videoZoomFactor: videoZoomFactor,
+                preferAppleProRAW: format.prefersAppleProRAW
+            ) {
                 // No processedFormat — a RAW-only capture, not a twin shot.
                 settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
             } else {
-                // This lens doesn't support RAW — fall back to HEIC rather than fail.
+                // No legal RAW format in the current configuration — fall back to HEIC rather than
+                // fail. Reached either when the lens offers no RAW at all, or when the only RAW on
+                // offer is Bayer and the device is zoomed (a sensor-crop preset like 2×/8× with
+                // ProRAW off). `CameraSessionManager.isRAWAvailableAtCurrentLens` surfaces this in
+                // the UI *before* the shutter, so the fallback isn't a silent surprise.
                 settings = AVCapturePhotoSettings()
             }
         }
@@ -69,12 +100,54 @@ final class PhotoCaptureService: NSObject, ObservableObject {
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
-    private func preferredRawPixelFormatType() -> OSType? {
-        if appleProRAWEnabled, photoOutput.isAppleProRAWSupported {
-            return photoOutput.availableRawPhotoPixelFormatTypes.first(where: { AVCapturePhotoOutput.isAppleProRAWPixelFormat($0) })
-                ?? photoOutput.availableRawPhotoPixelFormatTypes.first
+    /// A Portrait-mode capture (`PORTRAIT_MODE.md` Task 2): a normal HEIC, plus depth data, the
+    /// portrait effects matte, and the `.skin` semantic segmentation matte requested alongside
+    /// it. Task 5/6's bokeh render and Task 7's two-file save aren't built yet, so for now the
+    /// capture is saved as a single HEIC with all of that **embedded** — which keeps the data
+    /// inspectable in Photos and re-processable once the render pipeline lands.
+    ///
+    /// Every request is conditional on the output's matching `is…DeliveryEnabled` flag, which
+    /// `CameraSessionManager.enterPortraitConfiguration()` sets: asking a settings object for
+    /// delivery the output hasn't enabled throws `NSInvalidArgumentException`. Anything the
+    /// device declines simply doesn't get requested, which is Task 2's graceful degradation.
+    func capturePortraitPhoto(blurIntensity: Double, style: FilmStyle) {
+        let settings = AVCapturePhotoSettings()
+
+        // Unlike Manual's `.speed` (which protects dialed-in exposure from multi-frame fusion),
+        // Portrait is auto-exposed and wants the fuller pipeline that produces the mattes. The
+        // output's `maxPhotoQualityPrioritization` is raised to match while Portrait is active —
+        // exceeding that maximum throws.
+        settings.photoQualityPrioritization = .quality
+
+        if photoOutput.isDepthDataDeliveryEnabled {
+            settings.isDepthDataDeliveryEnabled = true
+            settings.embedsDepthDataInPhoto = true
         }
-        return photoOutput.availableRawPhotoPixelFormatTypes.first
+        if photoOutput.isPortraitEffectsMatteDeliveryEnabled {
+            settings.isPortraitEffectsMatteDeliveryEnabled = true
+            settings.embedsPortraitEffectsMatteInPhoto = true
+        }
+        let skinMatteTypes = photoOutput.enabledSemanticSegmentationMatteTypes.filter { $0 == .skin }
+        settings.enabledSemanticSegmentationMatteTypes = skinMatteTypes
+        settings.embedsSemanticSegmentationMattesInPhoto = !skinMatteTypes.isEmpty
+
+        stateLock.lock()
+        inFlightCaptures[settings.uniqueID] = InFlightCapture(
+            portraitDiagnostics: PortraitCaptureDiagnostics(),
+            portraitBlurIntensity: blurIntensity,
+            portraitStyle: style
+        )
+        stateLock.unlock()
+        isRenderingPortrait = true
+        photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+
+    private func preferredRawPixelFormatType(videoZoomFactor: CGFloat, preferAppleProRAW: Bool) -> OSType? {
+        RAWPixelFormatRule.preferredPixelFormat(
+            availableFormats: photoOutput.availableRawPhotoPixelFormatTypes,
+            preferAppleProRAW: preferAppleProRAW && photoOutput.isAppleProRAWSupported,
+            videoZoomFactor: videoZoomFactor
+        )
     }
 
     nonisolated private func save(data: Data, isRAW: Bool) {
@@ -149,12 +222,42 @@ extension PhotoCaptureService: AVCapturePhotoCaptureDelegate {
         error: Error?
     ) {
         guard error == nil else { return }
+        let uniqueID = photo.resolvedSettings.uniqueID
+
+        // Whether this was a Portrait capture is only knowable from the entry `capturePortraitPhoto`
+        // seeded — `AVCapturePhoto` itself doesn't say. Read under the lock, then do the actual
+        // (potentially slow) data extraction outside it.
         stateLock.lock()
-        inFlightCaptures[photo.resolvedSettings.uniqueID] = InFlightCapture(
-            data: photo.fileDataRepresentation(),
-            isRAW: photo.isRawPhoto
+        let pending = inFlightCaptures[uniqueID]
+        stateLock.unlock()
+
+        let isPortraitCapture = pending?.portraitDiagnostics != nil
+        let diagnostics: PortraitCaptureDiagnostics? = isPortraitCapture
+            ? PortraitCaptureDiagnostics(
+                hasDepthData: photo.depthData != nil,
+                hasPortraitMatte: photo.portraitEffectsMatte != nil,
+                hasSkinMatte: photo.semanticSegmentationMatte(for: .skin) != nil
+            )
+            : nil
+        let data = photo.fileDataRepresentation()
+
+        stateLock.lock()
+        // The render settings from the shutter press are carried forward deliberately — this
+        // callback replaces the whole entry, and dropping them would silently turn a styled
+        // Portrait shot into a plain unprocessed save.
+        inFlightCaptures[uniqueID] = InFlightCapture(
+            data: data,
+            isRAW: photo.isRawPhoto,
+            portraitDiagnostics: diagnostics,
+            portraitBlurIntensity: pending?.portraitBlurIntensity,
+            portraitStyle: pending?.portraitStyle,
+            portraitPhoto: isPortraitCapture ? photo : nil
         )
         stateLock.unlock()
+
+        if let diagnostics {
+            DispatchQueue.main.async { [weak self] in self?.lastPortraitDiagnostics = diagnostics }
+        }
     }
 
     nonisolated func photoOutput(
@@ -167,10 +270,67 @@ extension PhotoCaptureService: AVCapturePhotoCaptureDelegate {
         stateLock.unlock()
 
         if let error {
-            DispatchQueue.main.async { [weak self] in self?.lastCaptureError = error.localizedDescription }
+            DispatchQueue.main.async { [weak self] in
+                self?.lastCaptureError = error.localizedDescription
+                self?.isRenderingPortrait = false
+            }
             return
         }
-        guard let data = context?.data else { return }
+        guard let data = context?.data else {
+            DispatchQueue.main.async { [weak self] in self?.isRenderingPortrait = false }
+            return
+        }
+
+        if let photo = context?.portraitPhoto {
+            renderPortrait(
+                photo: photo,
+                originalData: data,
+                blurIntensity: context?.portraitBlurIntensity ?? 0.5,
+                style: context?.portraitStyle ?? .natural
+            )
+            return
+        }
+
         save(data: data, isRAW: context?.isRAW ?? false)
+    }
+
+    /// Renders the bokeh + style and saves **one** asset: the finished Portrait photo.
+    ///
+    /// **Deviation from `PORTRAIT_MODE.md` Task 7, per explicit user request (2026-08-11): "save one
+    /// photo for portrait images. Only the portrait image."** The spec asks for two files per shot —
+    /// the styled result plus the untouched original archived for later re-processing — and that's
+    /// what this did until now. Don't reinstate the archive without asking; it doubles the album's
+    /// asset count, which is the visible cost the user was reacting to.
+    ///
+    /// `originalData` is still carried in, but now only as the safety net: if the render fails the
+    /// unprocessed capture is saved in its place, because a broken effect must never cost the shot.
+    /// Either way exactly one photo reaches the album, and the thumbnail shows whatever was saved.
+    nonisolated private func renderPortrait(
+        photo: AVCapturePhoto,
+        originalData: Data,
+        blurIntensity: Double,
+        style: FilmStyle
+    ) {
+        renderQueue.async { [weak self] in
+            guard let self else { return }
+
+            let rendered = self.renderer.render(photo: photo, blurIntensity: blurIntensity, style: style)
+            if let rendered {
+                self.save(data: rendered.data, isRAW: false)
+                // Fold what the render managed into the shot's diagnostics, so "depth arrived but
+                // no blur came out" is visible on screen instead of looking like a working render.
+                DispatchQueue.main.async {
+                    self.lastPortraitDiagnostics?.didApplyBokeh = rendered.didApplyBokeh
+                }
+            } else {
+                // Render failed — keep the shot by saving the unprocessed frame, and say so rather
+                // than leaving an unexplained ordinary-looking photo in the album.
+                self.save(data: originalData, isRAW: false)
+                DispatchQueue.main.async {
+                    self.lastCaptureError = "Couldn't render the Portrait effect — saved the unprocessed photo instead."
+                }
+            }
+            DispatchQueue.main.async { self.isRenderingPortrait = false }
+        }
     }
 }

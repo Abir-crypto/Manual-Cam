@@ -42,8 +42,11 @@ struct TimerSetupSheet: View {
 
                 Section {
                     Button {
-                        onStart(config)
+                        // Dismiss first: the caller starts the run once this sheet is
+                        // actually off screen, so the countdown's first numeral and beep
+                        // aren't spent behind a sheet that's still animating away.
                         dismiss()
+                        onStart(config)
                     } label: {
                         Text("Start")
                             .fontWeight(.semibold)

@@ -12,18 +12,22 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Capture") {
+                Section {
+                    // One three-way picker rather than a format picker plus a separate ProRAW toggle:
+                    // the toggle only meant anything while RAW was selected, so in HEIC mode it was a
+                    // control that changed nothing. ProRAW is omitted entirely on hardware that doesn't
+                    // support it, exactly as the old toggle was hidden.
                     Picker("Format", selection: $settingsStore.defaultCaptureFormat) {
-                        ForEach(CaptureFormat.allCases) { format in
+                        ForEach(availableFormats) { format in
                             Text(format.displayName).tag(format)
                         }
                     }
 
-                    if sessionManager.isAppleProRAWSupported {
-                        Toggle("Apple ProRAW", isOn: $settingsStore.appleProRAWEnabled)
-                    }
-
                     Toggle("Focus Peaking", isOn: $settingsStore.isPeakingEnabled)
+                } header: {
+                    Text("Capture")
+                } footer: {
+                    Text(formatFooter)
                 }
 
                 Section {
@@ -47,6 +51,28 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+    }
+
+    /// ProRAW is dropped on devices that don't support it, so the picker never offers a format that
+    /// would silently fall back to something else.
+    private var availableFormats: [CaptureFormat] {
+        CaptureFormat.allCases.filter { format in
+            guard format.prefersAppleProRAW else { return true }
+            return sessionManager.isAppleProRAWSupported
+        }
+    }
+
+    /// Explains the choice in place, since the difference between the two RAW flavours isn't guessable
+    /// from their names — and one of them can't be used on the cropped zoom presets at all.
+    private var formatFooter: String {
+        switch settingsStore.defaultCaptureFormat {
+        case .heic:
+            return "Processed and compressed. Smallest files."
+        case .raw:
+            return "Undemosaiced sensor data — maximum editing latitude. Needs an uncropped sensor, so it isn't available on the cropped zoom lenses."
+        case .appleProRAW:
+            return "Demosaiced linear DNG with Apple's colour and lens corrections. Larger files, and the only RAW available on the cropped zoom lenses."
         }
     }
 

@@ -15,6 +15,38 @@ nonisolated final class ManualControlEngine: ObservableObject {
     @Published var lensPosition: Float = 0.5
     @Published var whiteBalanceKelvin: Double = 5600
 
+    /// Why the manual controls are currently frozen — see `isLocked`. Modeled as a *set* of
+    /// independent reasons rather than one Bool because there are two unrelated owners, and a
+    /// shared Bool would let either one clear the other's lock: a Multi-Shot Timer run ending
+    /// would unfreeze the controls even if Portrait mode still needed them frozen.
+    enum LockReason: Hashable {
+        /// A Multi-Shot Timer sequence is running (`MULTI_SHOT_TIMER.md`, Task 1: "current
+        /// manual settings are locked at the moment Start is tapped and used unchanged for
+        /// every shot").
+        case captureRun
+        /// Portrait mode is active (`PORTRAIT_MODE.md`, Task 1: manual controls are hidden).
+        /// Portrait runs on the virtual multi-camera device in continuous auto modes, and this
+        /// engine must not fight that — nor call `setFocusModeLocked(lensPosition:)` on a
+        /// device that doesn't support it (the documented crash — see `CameraLens`).
+        case portraitMode
+    }
+
+    @Published private(set) var lockReasons: Set<LockReason> = []
+
+    /// True while anything owns the controls. Every public setter no-ops while set, so the
+    /// values in effect stay exactly what they were.
+    ///
+    /// This is enforced in the engine rather than the UI because the UI isn't the only input
+    /// path: the Camera Control hardware bar (base spec Task 12) and its light-press handler
+    /// drive these setters *directly*, bypassing any overlay or hidden view — on Camera
+    /// Control hardware a nudge of the dial would otherwise change exposure mid-timer-run, or
+    /// poke manual values at a Portrait session that has no business receiving them.
+    var isLocked: Bool { !lockReasons.isEmpty }
+
+    /// Center of the frame in `AVCaptureDevice` point-of-interest space (which is
+    /// normalized 0...1, origin top-left of the *sensor* in landscape).
+    static let centerPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+
     private weak var device: AVCaptureDevice?
     private let queue: DispatchQueue
 
@@ -51,8 +83,20 @@ nonisolated final class ManualControlEngine: ObservableObject {
 
     // MARK: - Setters
 
+    /// Freeze (or release) the manual controls on behalf of one owner — see `isLocked`.
+    /// Reasons are independent: the controls stay frozen until *every* owner has released.
+    /// Call on main, like every other `@Published` mutation here.
+    func setLocked(_ locked: Bool, for reason: LockReason) {
+        if locked {
+            lockReasons.insert(reason)
+        } else {
+            lockReasons.remove(reason)
+        }
+    }
+
     /// Sets ISO while preserving the device's current shutter duration.
     func setISO(_ iso: Float) {
+        guard !isLocked else { return }
         let clamped = clampedISO(iso)
         self.iso = clamped
         queue.async { [weak self] in
@@ -63,6 +107,7 @@ nonisolated final class ManualControlEngine: ObservableObject {
 
     /// Sets shutter speed while preserving the device's current ISO.
     func setExposureDuration(_ duration: CMTime) {
+        guard !isLocked else { return }
         let clamped = clampedDuration(duration)
         self.exposureDuration = clamped
         queue.async { [weak self] in
@@ -72,6 +117,7 @@ nonisolated final class ManualControlEngine: ObservableObject {
     }
 
     func setLensPosition(_ position: Float) {
+        guard !isLocked else { return }
         let clamped = min(max(position, ManualControlRanges.lensPositionRange.lowerBound), ManualControlRanges.lensPositionRange.upperBound)
         self.lensPosition = clamped
         queue.async { [weak self] in
@@ -85,6 +131,7 @@ nonisolated final class ManualControlEngine: ObservableObject {
     }
 
     func setWhiteBalanceKelvin(_ kelvin: Double) {
+        guard !isLocked else { return }
         let clamped = min(max(kelvin, ManualControlRanges.kelvinRange.lowerBound), ManualControlRanges.kelvinRange.upperBound)
         self.whiteBalanceKelvin = clamped
         queue.async { [weak self] in
@@ -109,6 +156,9 @@ nonisolated final class ManualControlEngine: ObservableObject {
     /// ISO/shutter/focus/white-balance — so the next slider drag continues from that
     /// point instead of the values from before the tap.
     func tapToReset(at devicePoint: CGPoint) {
+        // A tap-to-reset would re-meter the scene mid-run and break the "same exposure for
+        // every shot in the set" guarantee, so it's frozen along with the sliders.
+        guard !isLocked else { return }
         queue.async { [weak self] in
             guard let self, let device = self.device else { return }
 
@@ -130,6 +180,19 @@ nonisolated final class ManualControlEngine: ObservableObject {
                 self?.queue.async { self?.lockInSettledValues(on: device) }
             }
         }
+    }
+
+    /// Center-frame equivalent of `tapToReset(at:)`: let the device meter the scene with
+    /// its own auto exposure/focus/white balance, then lock wherever it settled in as the
+    /// manual starting point.
+    ///
+    /// This is SPEC.md Task 11's "if persistence is disabled, fall back to the device's
+    /// auto-exposure/auto-focus defaults on launch, letting the user start from a metered
+    /// baseline" — previously launch always began at this engine's hardcoded in-memory
+    /// defaults (ISO 100 / 1÷125 / lens 0.5 / 5600K) no matter what the scene actually
+    /// was, because `attach(device:)` applies those unconditionally.
+    func resetToMeteredBaseline() {
+        tapToReset(at: Self.centerPointOfInterest)
     }
 
     /// Reads back wherever auto focus/exposure/white balance settled after

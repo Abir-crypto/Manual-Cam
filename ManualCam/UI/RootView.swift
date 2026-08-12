@@ -23,6 +23,11 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .background {
+                // A backgrounded app's run-loop timers don't fire and its capture session
+                // is interrupted, so a timer run can't continue here — end it rather than
+                // leave a half-finished sequence to resume with meaningless timing.
+                // Shots already taken are independent photos and stay saved.
+                coordinator.cancelTimerRun()
                 coordinator.persistCurrentStateIfNeeded()
             } else if newPhase == .active, authStatus == .authorized {
                 coordinator.start()
