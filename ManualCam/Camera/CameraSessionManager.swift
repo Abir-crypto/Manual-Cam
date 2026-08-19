@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import UIKit
 
 /// Owns the `AVCaptureSession` lifecycle: device discovery, inputs/outputs, and
 /// start/stop. All session mutation happens on `sessionQueue` — never on main.
@@ -42,6 +43,17 @@ nonisolated final class CameraSessionManager: ObservableObject {
     @Published private(set) var portraitZoomOptions: [PortraitZoomOption] = []
     @Published private(set) var currentPortraitZoom: CGFloat?
     @Published var setupError: String?
+
+    /// Gravity-based rotation tracking state (see `startTrackingHorizonLevelRotation(for:)`).
+    /// Touched only from the `@MainActor` members in the rotation section at the bottom of this file
+    /// — the coordinator's KVO updates arrive on the main queue — so unlike the rest of this
+    /// nonisolated class these need no lock. Exempted from isolation checking rather than moved to a
+    /// separate MainActor type purely to keep the photo-output rotation in the same place as
+    /// `photoOutput` itself.
+    nonisolated(unsafe) private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    nonisolated(unsafe) private var rotationObservation: NSKeyValueObservation?
+    nonisolated(unsafe) private var lastValidCaptureRotationAngle: CGFloat?
+    nonisolated(unsafe) private var hasStartedOrientationNotifications = false
 
     private var isConfigured = false
     /// Whether the session is currently wired for Portrait (virtual device input + depth and
@@ -425,6 +437,39 @@ nonisolated final class CameraSessionManager: ObservableObject {
         return base > 0 ? base : 1.0
     }
 
+    /// `tan` of half a format's field of view — the quantity that's actually proportional to
+    /// `1 / focalLength`, and the piece the earlier field-of-view attempt at this got wrong.
+    ///
+    /// Nil for a field of view the format doesn't know (documented as 0) or a nonsensical one.
+    private static func halfAngleTangent(ofFieldOfView degrees: Float) -> CGFloat? {
+        guard degrees > 0, degrees < 180 else { return nil }
+        return CGFloat(tan(Double(degrees) * .pi / 360))
+    }
+
+    /// A lens's focal length as a multiple of the wide lens's — ~0.54 for an ultra-wide, ~4 for a
+    /// telephoto. Multiplied by 24mm to label the preset (`CameraLens.make`).
+    ///
+    /// **This is a ratio of tangents, not of angles — that distinction is the whole fix.** Field of
+    /// view relates to focal length through `tan(fov / 2) ∝ 1 / f`, so `f₁/f₂ = tan(fov₂/2) /
+    /// tan(fov₁/2)`. An earlier version of this divided the *angles* (`wideFOV / lensFOV`), which is
+    /// only a decent approximation for near-equal fields of view and progressively understates narrow
+    /// ones — that's what showed "7.5×" for a lens Apple markets as 8×, and it's why the code moved to
+    /// the zoom scale instead. The zoom scale then turned out to be wrong in the other direction (see
+    /// `buildLensPresets`), so this is the FOV route done correctly rather than a revert.
+    ///
+    /// Being a ratio also makes it **immune to the field-of-view convention**: whether the SDK reports
+    /// horizontal, vertical, or diagonal degrees, `tan(fov/2)` carries the same frame-dimension factor
+    /// for both lenses and it cancels. The one assumption is that both formats share an aspect ratio,
+    /// which holds for the 4:3 back lenses this app uses.
+    private static func focalLengthRatioToWide(
+        of device: AVCaptureDevice,
+        relativeTo wideHalfAngleTangent: CGFloat
+    ) -> CGFloat? {
+        guard let lensHalfAngleTangent = halfAngleTangent(ofFieldOfView: device.activeFormat.videoFieldOfView),
+              lensHalfAngleTangent > 0 else { return nil }
+        return wideHalfAngleTangent / lensHalfAngleTangent
+    }
+
     /// Portrait deliberately hands focus/exposure/white balance back to the device: depth and
     /// matte generation are tuned around the camera's own auto behavior, and the manual engine
     /// stays out of the way for the duration (see `enterPortraitConfiguration`).
@@ -554,22 +599,34 @@ nonisolated final class CameraSessionManager: ObservableObject {
             position: .back
         ).devices
 
-        // The virtual device reports each constituent lens's *exact* system-relative
-        // zoom factor (e.g. 5.0 for a 5x tele) — far more precise than approximating via
-        // a field-of-view ratio, which is what produced an imprecise "7.5x" for an "8x"
-        // lens before.
+        // mm labels are derived from each lens's **real field of view**, ratioed against the wide
+        // lens — see `focalLengthRatioToWide(of:relativeTo:)`. The zoom scale is deliberately not
+        // used for this: Apple's 0.5x is a rounded button label for an optical ratio nearer 0.54, so
+        // multiplying it by 24mm yields 12mm for a lens Apple specifies as 13mm.
+        let wideHalfAngleTangent = backLenses
+            .first { $0.deviceType == .builtInWideAngleCamera }
+            .flatMap { Self.halfAngleTangent(ofFieldOfView: $0.activeFormat.videoFieldOfView) }
+
+        // Fallback source, used only when a format reports no field of view (documented as 0 for
+        // "unknown"). The virtual device reports each constituent's switch-over factor exactly, but
+        // in *device-relative* units — hence the `wideAngleBaseZoomFactor` divisor.
         let virtualDevice = AVCaptureDevice.DiscoverySession(
             deviceTypes: Self.virtualDeviceTypes,
             mediaType: .video,
             position: .back
         ).devices.first
         let switchOverFactors = virtualDevice?.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) } ?? []
-        let ultraWideSystemZoom = virtualDevice.map { CGFloat($0.minAvailableVideoZoomFactor) } ?? 1.0
+        let wideBaseZoom = virtualDevice.map { wideAngleBaseZoomFactor(for: $0) } ?? 1.0
+        let ultraWideDeviceZoom = virtualDevice.map { CGFloat($0.minAvailableVideoZoomFactor) } ?? 1.0
 
-        func systemBaseZoom(for deviceType: AVCaptureDevice.DeviceType) -> CGFloat {
-            switch deviceType {
-            case .builtInUltraWideCamera: return ultraWideSystemZoom
-            case .builtInTelephotoCamera: return switchOverFactors.last ?? 1.0
+        func systemBaseZoom(for device: AVCaptureDevice) -> CGFloat {
+            if let wideHalfAngleTangent,
+               let ratio = Self.focalLengthRatioToWide(of: device, relativeTo: wideHalfAngleTangent) {
+                return ratio
+            }
+            switch device.deviceType {
+            case .builtInUltraWideCamera: return ultraWideDeviceZoom / wideBaseZoom
+            case .builtInTelephotoCamera: return (switchOverFactors.last ?? wideBaseZoom) / wideBaseZoom
             default: return 1.0
             }
         }
@@ -578,7 +635,7 @@ nonisolated final class CameraSessionManager: ObservableObject {
         var usedMillimeters = Set<Int>()
 
         for device in backLenses {
-            let baseZoom = systemBaseZoom(for: device.deviceType)
+            let baseZoom = systemBaseZoom(for: device)
             let baseLens = CameraLens.make(deviceType: device.deviceType, ownZoomFactor: 1.0, systemZoom: baseZoom)
             presets.append(baseLens)
             usedMillimeters.insert(baseLens.millimeters)
@@ -677,12 +734,111 @@ nonisolated final class CameraSessionManager: ObservableObject {
     /// composited over the same portrait preview. `isVideoRotationAngleSupported` is the guard:
     /// if a depth connection doesn't accept rotation, this no-ops rather than throwing, and the
     /// fallback would be to orient the `CIImage` in `DepthPreviewProcessor` instead.
+    ///
+    /// **Deliberately *not* the same mechanism as the photo output's rotation** (see
+    /// `startTrackingHorizonLevelRotation(for:)`), even though both read the same coordinator
+    /// property. These frames are composited over the preview layer, and the interface is locked to
+    /// portrait — so they must stay aligned with the portrait *UI*, not follow gravity. Making them
+    /// track physical rotation would send the peaking and film-style overlays spinning away from the
+    /// preview underneath them. A transient coordinator is therefore the right tool here: one value,
+    /// sampled at configuration time.
+    ///
+    /// Known limitation, unchanged by the photo-output fix and worth knowing about: because the value
+    /// is sampled from a gravity-based API at configuration time, launching (or switching lenses)
+    /// while holding the phone sideways bakes a sideways angle into these overlays until the next
+    /// reconfiguration. The overlays would need the coordinator's *preview* angle to be properly
+    /// immune, and that requires handing the preview layer to this class — it currently passes nil,
+    /// which makes `videoRotationAngleForHorizonLevelPreview` return 0 by documented contract.
     private func applyRotation(to connection: AVCaptureConnection?, for device: AVCaptureDevice) {
         guard let connection else { return }
         let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
         let angle = coordinator.videoRotationAngleForHorizonLevelCapture
         guard connection.isVideoRotationAngleSupported(angle) else { return }
         connection.videoRotationAngle = angle
+    }
+
+    // MARK: - Horizon-level capture rotation
+
+    /// The gravity-relative angle to apply to the photo output's connection so captures come out
+    /// level with the horizon, or nil before a device is being tracked.
+    ///
+    /// Read at shutter time by `PhotoCaptureService`. Refreshes before answering, so the value is the
+    /// device's orientation at the moment of the shot rather than whenever the last rotation
+    /// notification happened to arrive — unless the device is flat, in which case the cached
+    /// last-known-good angle is what comes back. See `refreshCaptureRotationAngle()`.
+    @MainActor var horizonLevelCaptureRotationAngle: CGFloat? {
+        refreshCaptureRotationAngle()
+        return lastValidCaptureRotationAngle
+    }
+
+    /// Starts (or re-targets) gravity-based rotation tracking for a device. Called from
+    /// `CameraCoordinator.handleDeviceAttached` on every device change — initial launch, each lens
+    /// switch to a different physical lens, and both directions of the Portrait virtual-device swap —
+    /// because the correct capture angle is device-specific, not just orientation-specific.
+    ///
+    /// **Must be called before that method's `shootingMode != .portrait` early return**, or Portrait
+    /// captures would keep whichever device's angle was tracked last.
+    @MainActor func startTrackingHorizonLevelRotation(for device: AVCaptureDevice) {
+        // Required: `UIDevice.orientation` reports `.unknown` forever unless notification generation
+        // has been started, and `.unknown` doesn't veto — so without this the face-up/face-down
+        // protection below would be silently inert. Guarded by a flag because these calls are
+        // reference counted and this method runs again on every device change.
+        if !hasStartedOrientationNotifications {
+            hasStartedOrientationNotifications = true
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        }
+
+        // **The coordinator must be retained.** It is a live observer of the device's physical
+        // rotation, not a one-shot query — a transient local instance (which is what `applyRotation`
+        // below still constructs, since it only ever needs a value at configuration time) reports
+        // whatever it can determine at construction and then never updates.
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+
+        // KVO's only job is keeping the cache warm *for the flat case*: it records the angle while
+        // the device is still held at a readable orientation, so that a shot taken later — face-up on
+        // a table, where no angle can be computed — has a sensible one to fall back on. The angle
+        // actually used by a capture is re-read at shutter time.
+        //
+        // The header says these updates arrive on the main queue; the hop is here anyway because
+        // `MainActor.assumeIsolated` would turn any exception to that into a crash at an unpredictable
+        // moment, and this costs nothing. `.initial` is omitted since the seed below covers it.
+        rotationObservation = coordinator.observe(
+            \.videoRotationAngleForHorizonLevelCapture,
+            options: [.new]
+        ) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshCaptureRotationAngle() }
+        }
+
+        // Seeded unconditionally, including when the device is already flat on a table at launch:
+        // the veto below only protects an angle that's *already* known good, so there has to be one.
+        lastValidCaptureRotationAngle = coordinator.videoRotationAngleForHorizonLevelCapture
+    }
+
+    /// Caches the coordinator's angle, unless the device is face-up or face-down.
+    ///
+    /// **The veto is the face-up/face-down case.** Lying flat, the gravity vector points straight
+    /// through the screen and carries no information about which way the device is rolled, so there is
+    /// no correct angle to compute — the right answer is to keep shooting at whatever orientation the
+    /// phone was last held in, which is also what the stock Camera app does. This matters for a real
+    /// shot, not an edge case: photographing a flat-lay from directly above puts the device face-up.
+    ///
+    /// `AVCaptureDevice.RotationCoordinator` has no way to *express* that ambiguity — its angle is a
+    /// plain `CGFloat` with no unknown sentinel — so it presumably holds its last value too, making
+    /// this belt-and-braces. It's kept because that behaviour is undocumented and unverifiable
+    /// without a device, and because being wrong here means arbitrarily rotated photos.
+    ///
+    /// Note `.unknown` deliberately does **not** veto. Only a positive face-up/face-down report does.
+    /// Treating "no information" as a veto would silently freeze the angle at its launch value on any
+    /// device or simulator where orientation notifications aren't flowing.
+    @MainActor private func refreshCaptureRotationAngle() {
+        guard let coordinator = rotationCoordinator else { return }
+        switch UIDevice.current.orientation {
+        case .faceUp, .faceDown:
+            return
+        default:
+            lastValidCaptureRotationAngle = coordinator.videoRotationAngleForHorizonLevelCapture
+        }
     }
 
     private func publishError(_ message: String) {

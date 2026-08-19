@@ -21,6 +21,13 @@ final class PhotoCaptureService: NSObject, ObservableObject {
 
     private let photoOutput: AVCapturePhotoOutput
 
+    /// Supplies the gravity-relative angle that makes a capture horizon-level, or nil if it isn't
+    /// known yet. Injected as a closure rather than reached for through a reference to
+    /// `CameraSessionManager` so this type keeps depending on nothing but its own output — the angle
+    /// is tracked in `CameraSessionManager.startTrackingHorizonLevelRotation(for:)`, which owns the
+    /// device and the retained `AVCaptureDevice.RotationCoordinator`.
+    private let horizonLevelRotationAngle: @MainActor () -> CGFloat?
+
     /// Portrait render settings, snapshotted per shot from the coordinator (see
     /// `capturePortraitPhoto(blurIntensity:style:)`) so a slider moved while a render is in flight
     /// can't change the frame already being processed.
@@ -56,8 +63,39 @@ final class PhotoCaptureService: NSObject, ObservableObject {
     nonisolated(unsafe) private var inFlightCaptures: [Int64: InFlightCapture] = [:]
     nonisolated(unsafe) private let stateLock = NSLock()
 
-    init(photoOutput: AVCapturePhotoOutput) {
+    init(photoOutput: AVCapturePhotoOutput, horizonLevelRotationAngle: @escaping @MainActor () -> CGFloat?) {
         self.photoOutput = photoOutput
+        self.horizonLevelRotationAngle = horizonLevelRotationAngle
+    }
+
+    /// Orients the next capture to gravity rather than to the interface.
+    ///
+    /// **Why this is needed at all:** the interface is locked to portrait, and a photo output
+    /// connection does not track device rotation on its own — it keeps whatever angle it was last
+    /// given (its default, which corresponds to the portrait interface). So every shot taken with the
+    /// phone physically rotated was saved rotated, instead of upright the way the stock Camera app
+    /// saves it. There is no per-shot rotation on `AVCapturePhotoSettings`; the connection is the only
+    /// lever, which is why this is a mutation immediately before `capturePhoto(with:delegate:)` rather
+    /// than part of the settings object.
+    ///
+    /// **Called from every capture entry point, which is every capture in the app.** Manual, Portrait,
+    /// and the Multi-Shot Timer all funnel through the two methods below, and `ASTRO_MODE.md` has its
+    /// stacking engine firing this same service sequentially, so Astro inherits this when it's built.
+    /// A timer run re-reads the angle per shot on purpose: settings are frozen for a run, but how the
+    /// phone is *held* isn't a setting, and a run can span minutes on a tripod being repositioned.
+    ///
+    /// Reading the angle here — synchronously, at shutter time — is the point. Sampling it on a
+    /// rotation notification and storing it would reintroduce the same class of bug from the other
+    /// side: the value applied would be whatever arrived last, not the orientation at the moment of
+    /// the shot.
+    ///
+    /// `isVideoRotationAngleSupported` is a required guard, not defensiveness: assigning an
+    /// unsupported angle throws `NSInvalidArgumentException`.
+    private func applyHorizonLevelRotation() {
+        guard let angle = horizonLevelRotationAngle(),
+              let connection = photoOutput.connection(with: .video),
+              connection.isVideoRotationAngleSupported(angle) else { return }
+        connection.videoRotationAngle = angle
     }
 
     func dismissError() {
@@ -68,6 +106,8 @@ final class PhotoCaptureService: NSObject, ObservableObject {
     /// because Bayer RAW is only legal at 1.0 and requesting it while zoomed throws
     /// `NSInvalidArgumentException`. See `RAWPixelFormatRule`.
     func capturePhoto(format: CaptureFormat, videoZoomFactor: CGFloat) {
+        applyHorizonLevelRotation()
+
         let settings: AVCapturePhotoSettings
 
         switch format {
@@ -111,6 +151,8 @@ final class PhotoCaptureService: NSObject, ObservableObject {
     /// delivery the output hasn't enabled throws `NSInvalidArgumentException`. Anything the
     /// device declines simply doesn't get requested, which is Task 2's graceful degradation.
     func capturePortraitPhoto(blurIntensity: Double, style: FilmStyle) {
+        applyHorizonLevelRotation()
+
         let settings = AVCapturePhotoSettings()
 
         // Unlike Manual's `.speed` (which protects dialed-in exposure from multi-frame fusion),

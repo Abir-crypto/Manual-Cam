@@ -60,7 +60,13 @@ final class CameraCoordinator: ObservableObject {
         let sessionManager = CameraSessionManager()
         self.sessionManager = sessionManager
         self.controlEngine = ManualControlEngine(queue: sessionManager.sessionQueue)
-        self.captureService = PhotoCaptureService(photoOutput: sessionManager.photoOutput)
+        // The angle is read at shutter time, not captured here — see
+        // `PhotoCaptureService.applyHorizonLevelRotation()`. `sessionManager` is unowned-safe to
+        // capture strongly: the coordinator owns it and both live for the app's lifetime.
+        self.captureService = PhotoCaptureService(
+            photoOutput: sessionManager.photoOutput,
+            horizonLevelRotationAngle: { sessionManager.horizonLevelCaptureRotationAngle }
+        )
         self.peakingProcessor = FocusPeakingProcessor()
         self.settingsStore = settingsStore
         self.intervalometer = IntervalometerService()
@@ -179,7 +185,11 @@ final class CameraCoordinator: ObservableObject {
         // position throws (see `CameraLens` and `ManualControlEngine.LockReason`).
         controlEngine.setLocked(isPortrait, for: .portraitMode)
 
-        if !isPortrait {
+        if isPortrait {
+            // Parse the film-style LUTs off-thread now, so picking a style doesn't stall the
+            // viewfinder on a 33³ table the first time it's graded.
+            FilmStyleGrade.prewarmLUTs()
+        } else {
             isDepthDebugEnabled = false
             subjectMonitor.reset()
         }
@@ -296,6 +306,12 @@ final class CameraCoordinator: ObservableObject {
     /// only run once, on the very first device.
     private func handleDeviceAttached(_ device: AVCaptureDevice) {
         applyInitialModeIfNeeded()
+
+        // Re-target gravity-based capture rotation at the new device. **Above the Portrait early
+        // return below on purpose** — Portrait shoots through the same photo output and needs a
+        // correctly oriented capture just as much as Manual does, and the correct angle is
+        // device-specific, so the virtual-device swap has to re-target it too.
+        sessionManager.startTrackingHorizonLevelRotation(for: device)
 
         // **Portrait deliberately does not attach the manual engine.** It runs on the virtual
         // multi-camera device, where `isLockingFocusWithCustomLensPositionSupported` is false and

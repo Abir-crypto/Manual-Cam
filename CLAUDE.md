@@ -211,22 +211,57 @@ so they persist across sessions:
       the header notes "makes it more usable for applying effects") **defaults to YES**, so photo depth
       is already hole-filled and this was never the cause of the patchy blur. Only
       `AVCaptureDepthDataOutput.isFilteringEnabled` — the live stream — needs setting by hand.
-    - **Deviation from `PORTRAIT_MODE.md` Task 6: Noir has no grain.** Confirmed bug plus a rejected
-      fix, 2026-08-11. The original mapped `CIRandomGenerator` to a dim grey with **alpha 1** and used
+    - **Deviation from `PORTRAIT_MODE.md` Task 6: the styles are 3D LUTs, and the spec's four named
+      looks are gone (2026-08-19).** The user supplied three `.cube` files and asked for "4 options.
+      One is original and other 3 are those. And remove the current ones", so the hand-tuned Golden
+      Hour / Teal Frost / Noir grade chains were **deleted**, not kept alongside. Shipped styles:
+      **Natural** (passthrough), **Vintage**, **Warm**, **Cine**. Mechanism notes:
+      - **`FilmStyle.lutResourceName` → `CubeLUTStore` → `CIColorCubeWithColorSpace`.** LUT files
+        live in `/ManualCam/Luts`, which is inside the file-system-synchronized group, so they reach
+        the bundle (flat, at its root) with **no pbxproj edit** — verified by inspecting the built
+        `.app`. The flip side: renaming a `.cube` on disk silently degrades that style to passthrough,
+        so `lutResourceName` has to be renamed with it. Two files are both named "Vintage"; the third
+        style's name (`Cine`) is chosen, not derived from its filename.
+      - **The parsed table is cached, and that's a requirement, not an optimization.** The live
+        preview calls `FilmStyleGrade.apply` per frame and the largest LUT is 33³ — 50ms of text
+        parsing on a Mac. `CubeLUTStore` caches the parsed `Data` (**not** a built `CIFilter`: two
+        queues call this concurrently and `CIFilter` is mutable with no documented thread safety), and
+        caches *failures* too, or a missing file gets re-read every frame. `FilmStyleGrade.prewarmLUTs()`
+        runs from `CameraCoordinator.applyMode` on entering Portrait so no frame pays the parse.
+      - **Two things bite when parsing `.cube`, both handled:** CRLF line endings (two of these files
+        are CRLF — a trailing `\r` makes `Float(_:)` nil out the last component of *every* line, so
+        the table parses as empty), and out-of-range cells (one file holds values from −0.47 to
+        1.008; the filter documents its table as premultiplied RGBA, so cells are clamped to 0…1).
+      - **`extrapolate = true`** (iOS 16+, from the SDK header: extrapolates "if the input image
+        contains RGB component values outside the range 0.0 to 1.0"). Load-bearing here: captures are
+        Display P3, the cube is applied in **sRGB**, so every out-of-sRGB-gamut colour encodes outside
+        0…1 and would otherwise flatten onto the cube boundary — the same silent colour clipping as
+        the hardcoded-sRGB `encodeHEIC` defect.
+      - **sRGB, not the working space and not P3, is the right cube colour space.** These are
+        display-referred Rec.709/sRGB LUTs, so sRGB is where their tables mean what the author
+        intended; applying them in P3 would dodge the gamut question but feed *every* pixel, skin
+        included, coordinates the table wasn't built for. Passing a space at all is the whole point of
+        `CIColorCubeWithColorSpace` over plain `CIColorCube` — it does the linear↔gamma round trip,
+        and a `.cube` looked up on linear light lands completely wrong.
+      - **Verify a LUT loader against an independent reference, not by eye.** A cube read with the
+        wrong cell ordering still renders a plausible-looking image. `.cube` and Core Image agree —
+        red varies fastest, blue selects the plane — which was confirmed by probing grey, skin, and
+        saturated red through both a from-scratch trilinear interpolator (Python) and the real filter
+        chain, matching to 8-bit rounding.
+      Historical, since the code is gone but the lesson isn't: **Noir never got its spec'd grain.** The
+      first attempt mapped `CIRandomGenerator` to a dim grey with **alpha 1** under
       `CISourceOverCompositing` — an opaque foreground over source-over *replaces* the background, so
-      Noir rendered as the noise layer itself. Device report: "the noir isn't working, it just shows
-      grey pixels." Correcting the alpha still looked bad: full-range, spatially uncorrelated noise
-      composited at 6–8% (even pre-blurred) lifts every shadow into grey speckle and undoes the
-      contrast the grade just built — verified by rendering a real photo through both variants and
-      comparing them side by side. Noir is now `photoEffectMono` + contrast, which looks genuinely
-      good. Proper grain needs zero-mean noise added in linear light, which CI's compositing filters
-      handle badly (addition compositing ignores a zero-alpha layer and mishandles negatives);
-      realistically a small `CIColorKernel`. **Don't re-add an opacity-based noise overlay — it has
-      been tried twice.**
+      Noir rendered as the noise layer itself ("the noir isn't working, it just shows grey pixels").
+      Fixing the alpha still looked bad: full-range, spatially uncorrelated noise at 6–8%, even
+      pre-blurred, lifts every shadow into grey speckle. Proper grain needs zero-mean noise added in
+      linear light, which CI's compositing filters handle badly (addition compositing ignores a
+      zero-alpha layer and mishandles negatives) — realistically a small `CIColorKernel`. **Don't
+      add an opacity-based noise overlay to a LUT style either; it has been tried twice.**
     - **Rendering a real photo through the grade chain off-device is the fastest way to judge these.**
       CoreImage is cross-platform, so a short Swift script run against the macOS toolchain can load a
       HEIC, apply the same filter chain, and write a PNG (or a side-by-side comparison) to look at.
-      That is how both the grain verdict and the sRGB colour-space defect were settled. Far better
+      That is how the grain verdict, the sRGB colour-space defect, and the LUT loader's correctness
+      were all settled. Far better
       than reasoning about blend-mode semantics — several confident predictions about compositing
       neutrality in a linear working space turned out simply wrong when measured.
     - **Deviation from `PORTRAIT_MODE.md`: the periphery swirl is removed.** Task 5's whole premise
@@ -361,9 +396,9 @@ so they persist across sessions:
   (depth+matte+calibration, aperture from slider) → composite subject back on top via matte. (The
   spec file's middle step — a radial swirl twist on the background, twist rising toward the edges —
   was built and then **removed at the user's request**; see the deviation note above.) Four film
-  styles — Natural
-  (passthrough), Golden Hour, Teal Frost, Noir — as Core Image grade chains applied to the
-  **final composite**. Baked-in (no UI toggle): skin smoothing via the skin matte (~30–40%
+  styles — Natural (passthrough), Vintage, Warm, Cine — applied to the **final composite**; the
+  three graded ones are user-supplied 3D LUTs from `/ManualCam/Luts`, **not** the spec's Golden
+  Hour / Teal Frost / Noir, which are deleted (see the Task 6 deviation above). Baked-in (no UI toggle): skin smoothing via the skin matte (~30–40%
   blend) and edge softness (small fixed blur on the matte before compositing). The spec asks for
   **two** files per shot (final styled HEIC + the original unprocessed capture) — **as shipped it
   saves one**, the styled photo only; see the Task 7 deviation above. Degrade to depth-only
@@ -601,14 +636,38 @@ These are explicit product decisions — don't "improve" past them:
   specs). Presets are labeled by their approximate 35mm-equivalent focal length in mm
   (`CameraLens.make`, `systemZoom * 24` — 24mm being the conventional iPhone wide-lens
   equivalent), not a plain zoom multiplier or fixed lens name.
-  Getting the underlying `systemZoom` number right took two iterations: the first used a
-  field-of-view ratio (`wideFOV / lensFOV` from `AVCaptureDeviceFormat.videoFieldOfView`)
-  as an approximation, which was imprecise enough to show "7.5×" for a lens Apple markets
-  as 8×. `buildLensPresets()` now separately discovers the *virtual* multi-camera device
-  (`.builtInTripleCamera` etc — queried only for its numbers, never used as the actual
-  input, per the crash above) and reads its exact `virtualDeviceSwitchOverVideoZoomFactors`
-  (each lens's true native system-relative zoom) and `minAvailableVideoZoomFactor`
-  (ultra wide's). Presets are also de-duplicated by their rounded mm value
+  **Getting the underlying `systemZoom` number right took three iterations. The mm label comes
+  from real field of view, and the conversion is a ratio of *tangents* — don't "simplify" either
+  of those.** History, because each attempt failed in a different direction:
+  1. **Ratio of field-of-view angles** (`wideFOV / lensFOV`). Wrong maths: field of view relates to
+     focal length through `tan(fov/2) ∝ 1/f`, so dividing the angles only approximates, and
+     progressively understates narrow lenses. Showed "7.5×" for a lens Apple markets as 8× (the
+     tangent form gives 8× exactly; the angle form gives 7.17× — the recorded symptom).
+  2. **The virtual device's zoom scale** — `virtualDeviceSwitchOverVideoZoomFactors` and
+     `minAvailableVideoZoomFactor`. Exact numbers, wrong meaning, in two separate ways:
+     - **They're device-relative, and nothing divided them by the wide-angle base.** Confirmed bug,
+       user report 2026-08-19: "the ultrawide is showing 24mm. instead of 13mm". The SDK is explicit
+       that `minAvailableVideoZoomFactor` is 1.0 except while a virtual device delivers depth — so
+       the ultra-wide's "system zoom" was **always literally 1.0**, i.e. the same as the wide lens,
+       printing 24mm. The telephoto was wrong the same way but less visibly: `switchOverFactors.last`
+       is ~8.0 in device units on a 4× tele, so it printed 192mm. This is the exact trap already
+       documented for Portrait's lens row (`wideAngleBaseZoomFactor`); that row was fixed and this
+       older path wasn't.
+     - **Even normalised, the zoom scale can't produce Apple's mm figures.** 1.0/2.0 = 0.5, and
+       0.5 × 24mm = 12mm for a lens Apple specifies as **13mm**. Apple's `0.5×` is a rounded button
+       label for an optical ratio nearer 0.54; the zoom scale is not linear in focal length across
+       the ultra-wide/wide boundary, so no single mm anchor satisfies both ends.
+  3. **Shipped: `focalLengthRatioToWide(of:relativeTo:)`** — `tan(wideFOV/2) / tan(lensFOV/2)`,
+     anchored so the wide lens is exactly 24mm. Reproduces Apple's published 13 / 24 / 100 / 200mm
+     figures. Being a *ratio* also makes it immune to whether the SDK reports horizontal, vertical, or
+     diagonal degrees — the frame-dimension factor cancels — with the sole assumption that both
+     formats share an aspect ratio (true for the 4:3 back lenses). Secondary crop presets stay
+     `baseMM × ownZoomFactor`, which is exact: a 2× crop halves the linear field of view.
+     The zoom-scale route survives only as a fallback for a format reporting `videoFieldOfView == 0`
+     ("unknown" per the header), and that fallback *is* now normalised by `wideAngleBaseZoomFactor`.
+     `buildLensPresets()` still discovers the *virtual* multi-camera device for those numbers —
+     queried only for its numbers, never used as the actual input, per the crash above.
+  Presets are also de-duplicated by their rounded mm value
   (`usedMillimeters`) — some lenses report a `secondaryNativeResolutionZoomFactors` entry
   that lands right on the same mm value as that lens's own base preset (e.g. an extra
   "1x"-equivalent entry duplicating "Wide"), which must be skipped or the picker shows two
@@ -743,6 +802,58 @@ These are explicit product decisions — don't "improve" past them:
   Since ProRAW became a format case, `PhotoCaptureService` no longer keeps its own copy of the
   preference — the per-capture choice comes from `CaptureFormat.prefersAppleProRAW` at shutter
   time, so there's only one source of truth and nothing to keep in sync.
+  **Captures are oriented to gravity, not to the interface — confirmed bug, fixed 2026-08-19.**
+  User report: the UI is locked to portrait, and photos taken with the phone physically rotated saved
+  rotated instead of upright, unlike the stock Camera app. Root cause: an `AVCapturePhotoOutput`
+  connection does **not** track device rotation on its own — it keeps whatever angle it last had (the
+  default, matching the portrait interface), and nothing in the app ever set it. Notes:
+  - **`AVCaptureDevice.RotationCoordinator.videoRotationAngleForHorizonLevelCapture` is the right
+    source, not `CMMotionManager` and not `UIDevice.current.orientation`.** It *is* the gravity-based
+    API (header: "by how much the photos or movies captured from the camera should be rotated to be
+    horizon-level relative to gravity"), it's KVO-observable on the main queue, and it accounts for
+    the per-camera-position differences a hand-rolled gravity→angle mapping would get wrong. The type
+    was already in the project for the video data output, so no new dependency.
+  - **The coordinator must be *retained*.** It's a live observer, not a one-shot query.
+    `applyRotation(to:for:)` constructs a throwaway local one — fine there, because that path only
+    needs a single value at configuration time, but copying that pattern for photo capture would
+    produce an angle that never updates. `startTrackingHorizonLevelRotation(for:)` holds it, and
+    re-targets on **every** device change since the angle is device-specific.
+  - **Wired above `handleDeviceAttached`'s Portrait early return**, or Portrait — which shoots through
+    the same photo output after a virtual-device swap — would keep the previously tracked device's
+    angle.
+  - **Applied in `PhotoCaptureService.applyHorizonLevelRotation()`, immediately before
+    `capturePhoto(with:delegate:)`, and re-read per shot.** There is no rotation property on
+    `AVCapturePhotoSettings`; the connection is the only lever. Both capture entry points call it, and
+    that covers every capture in the app — Manual, Portrait, and each Multi-Shot Timer shot (a timer
+    run re-reads deliberately: settings are frozen for a run, but how the phone is *held* isn't a
+    setting). `ASTRO_MODE.md` has its stacking engine firing this same service, so Astro inherits it.
+  - **`isVideoRotationAngleSupported` is a required guard** — assigning an unsupported angle throws
+    `NSInvalidArgumentException`.
+  - **Face-up/face-down is a real case, not an edge case, and is handled as a no-op.** Flat, gravity
+    points through the screen and says nothing about roll, so there's no angle to compute; the app
+    keeps the last angle read at a usable orientation (what stock Camera does). Shooting a flat-lay
+    from directly above is exactly this. Implemented as a **veto** — the angle always comes from the
+    coordinator, `UIDevice.current.orientation` only decides whether to *cache* it — so the two can't
+    disagree about the value. `.unknown` deliberately does **not** veto: treating "no information" as
+    a veto would freeze the angle at its launch value wherever orientation notifications aren't
+    flowing. This needs `beginGeneratingDeviceOrientationNotifications()` or `orientation` is
+    permanently `.unknown` and the whole protection is silently inert.
+  - The coordinator probably holds its own last value when flat (its angle is a bare `CGFloat` with no
+    unknown sentinel, so it has no way to express the ambiguity), which would make the veto
+    belt-and-braces. Kept because that's undocumented, unverifiable off-device, and the failure mode
+    is arbitrarily rotated photos.
+  - **`PortraitRenderer` needed no change** and must stay that way: it reads the delivered photo's
+    own `kCGImagePropertyOrientation` and applies it to depth and both mattes, so it follows the
+    connection automatically. Don't replace that with a fixed orientation.
+  - **Not to be confused with the video data output's rotation.** Those frames are composited over the
+    portrait-locked preview and must stay aligned with the *UI*; making them follow gravity would send
+    the peaking and film-style overlays spinning away from the preview. Separate mechanism on purpose.
+    Latent issue found while here and left alone as out of scope: because that angle is sampled from a
+    gravity-based API at configuration time, launching or switching lenses while holding the phone
+    sideways bakes a sideways angle into those overlays until the next reconfiguration. Fixing it
+    properly means handing the preview layer to `CameraSessionManager` so the coordinator's *preview*
+    angle is usable — it currently passes nil, which returns 0 by documented contract.
+
   Both `CameraSessionManager.photoOutput.maxPhotoQualityPrioritization` and each capture's
   `AVCapturePhotoSettings.photoQualityPrioritization` are `.speed`, not `.quality` —
   confirmed bug: `.quality` opts into Apple's multi-frame fusion (Smart HDR/Deep
